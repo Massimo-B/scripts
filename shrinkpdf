@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
+#############################################################################
+# $HGFile: shrinkpdf $
+# $HGLocation: /home/mb/src/tools $
+
+# 1st Author: Massimo
+# Created: 2012-10-26
+
+# $HGChecked in by: massimo $
+# $HGDate: 2018-09-21 14:08 +0200 $
+version='$HGRevision: 10 $'
+# $HGBranch:  $
+# $HGDesc: Fixed du calculation $
+#############################################################################
+
+# Checking Bash version
+(( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
+
+# Libraries
+libs=( output )
+for lib in "${libs[@]}"; do
+    lib_path="${BASH_PREFIX:-/}usr/local/lib/lib_$lib"
+    if [[ lib_$lib ]]; then
+        source "lib_$lib"
+        continue
+    elif [[ -e "$lib_path" ]]; then
+        source "$lib_path"
+        continue
+    else
+        echo "$lib_path not found" 1>&2; exit 1;
+    fi
+done
+
+usage() {
+    cat <<EOF
+This is $0 $version
+
+Usage:
+    $0 [OPTIONS] <target pdf files>
+
+Description:
+    Compressing pdf files by 2 step process through qpdf and pdftk.
+    Automatically keeps original if compression is zero or even worse.
+    
+    File with subsctring "noshrink" as part of their filename are skipped, such as manual_noshrink.pdf .
+
+Options:
+    -k, --keep              keep new files and don't overwrite old ones
+    -p, --pdfsetting        PDFSETTINGS, with decreasing quality: default, prepress, printer, ebook, screen
+    -v, --verbose           Verbose
+    -h, --help              Show this help
+
+Dependencies:
+
+    * pdftk
+    * qpdf
+
+EOF
+}
+
+while [[ $1 == -* ]]; do
+    case "$1" in
+        -k|--keep)          opt_keep=1
+                            shift;;
+        -v|--verbose)       opt_verbose=1
+                            shift;;
+        -p|--pdfsetting)    shift
+                            case $1 in
+                                default|prepress|printer|ebook|screen)  true;;
+                                *) die "invalid pdfsetting: $1";
+                            esac
+                            opt_pdfsetting=$1
+                            shift;;
+        -h|--help|-\?)      usage
+                            exit 0;;
+        -*) echo "invalid option: $1" 1>&2; usage; exit 1;;
+    esac
+done
+
+#gs	-q -dNOPAUSE -dBATCH -dSAFER \
+#	-sDEVICE=pdfwrite \
+#	-dCompatibilityLevel=1.3 \
+#	-dPDFSETTINGS=/screen \
+#	-dEmbedAllFonts=true \
+#	-dSubsetFonts=true \
+#	-dColorImageDownsampleType=/Bicubic \
+#	-dColorImageResolution=72 \
+#	-dGrayImageDownsampleType=/Bicubic \
+#	-dGrayImageResolution=72 \
+#	-dMonoImageDownsampleType=/Bicubic \
+#	-dMonoImageResolution=72 \
+#	-sOutputFile="${1%.*}_gs.pdf" \
+#	 "$1"
+
+shopt -s nullglob
+export LC_NUMERIC=C
+
+
+# Dependency checks
+type -ap pdftk &>/dev/null || die "pdftk not found"
+type -ap qpdf &>/dev/null || die "qpdf not found"
+type -ap gs &>/dev/null || die "gs not found"
+
+for file in "$@"; do
+    [[ $file == *"noshrink"* ]] && continue
+    (( ${#file} > ${maxlength_filename:-0} )) && maxlength_filename="${#file}"
+done
+
+for file in "$@"; do
+    [[ $file == *"noshrink"* ]] && {
+        echo "Skipped $file"
+        continue
+    }
+
+    printf "Processing %*s: " "$maxlength_filename" "$file"
+
+    if [[ ! -r $file ]]; then
+        warn "File $file does not exist, skipped"
+        continue
+    fi
+
+    this_type="$(file -b "$file")"
+    if [[ $this_type != PDF* ]]; then
+        warn "File $file is not of PDF type but $this_type, skipped"
+        continue
+    fi
+
+    if [[ $file != *.pdf && $file != *.PDF ]]; then
+        warn "File $file does not fit naming convention: *.pdf or *.PDF, skipped"
+        continue
+    fi
+
+    original_size=( $(du -b "$file" 2>/dev/null) )
+    printf " original: %-5s ->" "$(du -bh "$file" 2>/dev/null |awk '{print $1}')" 
+
+
+    current_file="${file}"
+
+    # 0. step: gs compression
+    if [[ -n $opt_pdfsetting ]]; then
+        gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 -dPDFSETTINGS=/${opt_pdfsetting} -dNOPAUSE -dQUIET -dBATCH -sOutputFile="${current_file}_${opt_pdfsetting}" "${current_file}"
+        gs_status="$?"
+        if (( $gs_status != 0 )); then
+            rm -f ${opt_verbose:+-v} "${current_file}_${opt_pdfsetting}"
+            error "gs failed, ${current_file}_${opt_pdfsetting} dropped."
+        fi
+        # 1.2: gs size
+        if [[ -s ${current_file}_${opt_pdfsetting} ]]; then
+            gs_size=( $(du -b "${current_file}_${opt_pdfsetting}" 2>/dev/null) )
+        else
+            gs_size="0"
+        fi
+        gs_ratio="$(bc <<< "scale=4; $gs_size / $original_size * 100")"
+        printf " 0.gs: %-5s " \
+            "$(du -bh "${current_file}_${opt_pdfsetting}" 2>/dev/null |awk '{print $1}')"
+
+        current_file="${current_file}_${opt_pdfsetting}"
+    fi
+
+    # 1.step: qpdf
+    #         decrypting useless passwords for stupid pdftk
+    qpdf \
+        --decrypt\
+        --linearize\
+        --object-streams=generate\
+        --stream-data=compress\
+        "${current_file}" "${current_file}_qpdf" 2>/dev/null
+    qpdf_status="$?"
+    if (( $qpdf_status != 0 )); then
+        if (( $qpdf_status == 3 )); then
+            true
+            # qpdf returned warnings, resulting file may have some problems 
+        else
+            rm -f ${opt_verbose:+-v} "${curent_file}_qpdf"
+            error "qpdf failed, ${current_file}_qpdf dropped."
+        fi
+    fi
+
+    # 1.2: qpdf size
+    if [[ -s ${current_file}_qpdf ]]; then
+        qpdf_size=( $(du -b "${current_file}_qpdf" 2>/dev/null) )
+    else
+        qpdf_size="0"
+    fi
+    qpdf_ratio="$(bc <<< "scale=4; $qpdf_size / $original_size * 100")"
+    printf " 1.qpdf: %-5s " \
+        "$(du -bh "${current_file}_qpdf" 2>/dev/null |awk '{print $1}')"
+
+    # 2.step: pdftk
+    pdftk "${current_file}_qpdf" output "${current_file}_pdftk" compress ${opt_verbose:+-verbose} 2>/dev/null
+    if (( $? != 0 )); then
+        rm -f ${opt_verbose:+-v} "${current_file}_pdftk"
+        #error "pdftk failed."
+        error "pdftk failed, ${current_file}_pdftk dropped."
+        continue
+    fi
+
+    # 2.2: pdftk size
+    if [[ -s ${current_file}_pdftk ]]; then
+        pdftk_size=( $(du -b "${current_file}_pdftk" 2>/dev/null) )
+    else
+        pdftk_size="0"
+    fi
+    pdftk_ratio="$(bc <<< "scale=4; $pdftk_size / $original_size * 100")"
+    printf " 2.pdftk: %-5s " \
+        "$(du -bh "${current_file}_pdftk" 2>/dev/null |awk '{print $1}')"
+
+    # 3.1: Decide wether to keep original or to overwrite, first checking pdftk size
+
+    if [[ -n $opt_keep ]]; then
+            mv ${opt_verbose:+-v} "${file}" "${file}_orig"
+
+        if (( $? != 0 )); then
+            warn_n "Option --keep enabled, but failed to backup $file, skipped."
+            continue
+        fi
+    fi
+    if (( $pdftk_size > 0 && $pdftk_size < $original_size && $pdftk_size < $qpdf_size )); then
+        mv -f "${current_file}_pdftk" "${file}" || {
+            warn "Moving ${current_file}_pdftk over original failed, skipped."
+            continue
+        }
+        rm -f ${opt_verbose:+-v} "${current_file}_qpdf" || {
+            warn "Removing ${file}_qpdf failed, skipped."
+            continue
+        }
+        success_n "pdftk $(printf "[%5.1f%%]" "$pdftk_ratio") and kept. "
+    else
+        rm -f ${opt_verbose:+-v} "${current_file}_pdftk"
+        warn_n "pdftk $(printf "[%5.1f%%]" "$pdftk_ratio") and dropped. "
+
+        # 3.2: Checking qpdf size
+
+        if (( $qpdf_size > 0 && $qpdf_size < $original_size )); then
+            mv -f "${current_file}_qpdf" "$file" || {
+                warn "Moving ${file}_qpdf over original failed, skipped."
+                continue
+            }
+            success_n "qpdf $(printf "[%5.1f%%]" "$qpdf_ratio") and kept."
+        else
+            rm -f ${opt_verbose:+-v} "${current_file}_qpdf" || {
+                warn "Removing ${current_file}_qpdf failed, skipped."
+                continue
+            }
+            [[ -z $opt_keep ]] && rm -f ${opt_verbose:+-v} "${file}_orig"
+            warn_n "qpdf $(printf "[%5.1f%%]" "$qpdf_ratio") dropped and reverted."
+        fi
+    fi
+    [[ -z $opt_keep ]] && [[ -n $opt_pdfsetting ]] && [[ -f ${file}_${opt_pdfsetting} ]] && rm -f ${opt_verbose:+-v} "${file}_${opt_pdfsetting}"
+    printf "\n"
+
+    if (( $qpdf_status == 3 )); then
+        warn "qpdf returned warnings, resulting file may have some problems "
+    fi
+
+done
+

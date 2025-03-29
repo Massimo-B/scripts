@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
+#############################################################################
+# $HGFile: dar_script $
+# $HGLocation: /home.crypt/mb/src/tools $
+
+# 1st Author: Massimo
+# Created: 2006
+
+# $HGChecked in by: massimo $
+# $HGDate: 2015-07-19 17:39 +0200 $
+# $HGRevision: 6 $
+# $HGBranch:  $
+# $HGDesc: updates $
+#############################################################################
+
+# Checking Bash version
+(( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
+
+## User Configuration #######################################################
+declare -A conf tmp
+conf[c_nice]="15"
+
+#conf[c_backup_source]=~
+#conf[c_slice]="3800M"
+conf[c_backup_onefilesystem]="true"
+
+#conf[c_exclude_dirs]=""
+
+conf[c_empty_dirs]=""
+
+conf[c_exclude_files]="
+*.dar
+*.swp
+"
+
+conf[c_exclude_compress]="
+*.AVI
+*.GIF
+*.GZ
+*.JPEG
+*.JPG
+*.MOV
+*.MP*
+*.PNG
+*.RAR
+*.ZIP
+*.avi
+*.bz2
+*.gif
+*.gz
+*.jar
+*.jpeg
+*.jpg
+*.mov
+*.mp*
+*.png
+*.rar
+*.sqfs
+*.svgz
+*.tar*
+*.tgz
+*.zip
+"
+#############################################################################
+
+this_basename="${0##*/}"
+this_dirname="${0%/*}"
+
+# Libraries
+libs=( output )
+for lib in "${libs[@]}"; do
+    lib_path="${BASH_PREFIX:-/}usr/local/lib/lib_$lib"
+    [[ -e "$lib_path" ]] || { echo "$lib_path not found" 1>&2; exit 1; }
+    source "$lib_path"
+done
+
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS] <source_root_dir> <target_dir>
+
+Custom backup using dar.
+Does differential backups if possible, otherwise full backup.
+The filename in <target_dir> will be generated from path <source_root_dir>.
+
+    Options:
+
+    -e, --exclude <file>    File with exclude patterns line-separated
+    -f, --full              Force full backup even when differential backup is possible
+    -i, --info              Show configuration information
+    -d, --debug             Debugging mode
+    -h, --help              Show this help
+
+   [-c, --crypt             Encrypt archives (currently not supported)]
+EOF
+}
+
+print_config() {
+    for key in ${!conf[@]}; do
+        printf "%-20s = %s\n" "${key#c_}" "${conf[$key]}"
+    done | sort
+}
+
+while [[ $1 == -* ]]; do
+    case "$1" in
+        -e|--exclude)   shift
+                        if [[ $1 == -* || -z $1 ]]; then
+                            die "No exclude pattern file given"
+                        fi
+                        if [[ ! -r $1 ]]; then
+                            die "Cannot read file \"$1\" or no exclude pattern file given"
+                        fi
+                        while read -r line; do
+                            debug "Adding  $line  to exclude_dirs"
+                            conf[c_exclude_dirs]+=" $line"
+                        done < "$1"
+                        shift;;
+        -c|--crypt)     opt_crypt=1;    shift;;
+        -d|--debug)     opt_debug=1;    shift;;
+        -f|--full)      opt_full=1;     shift;;
+        -i|--info)      opt_info=1;     shift;;
+        -h|--help|-\?)  usage;          exit 0;;
+        -*) echo "invalid option: $1" 1>&2; usage; exit 1;;
+    esac
+done
+
+# Checking for dar binary
+dar_bin="$(type -ap dar)" || die "dar binary not found"
+
+# Checking source_root_dir parameter
+if [[ -n $1 || -n $opt_info ]]; then
+    opt_source="$1"
+fi
+if [[ -z $opt_source ]]; then
+    error "No source root directory given!"
+    usage
+    exit 1
+fi
+if [[ ! -d $opt_source ]]; then
+    error "Source root directory $opt_source does not exist or is not a directory!"
+fi
+
+if [[ $opt_source == "/" ]]; then
+    # backup source is /
+    conf[c_backup_source]="${opt_source}"
+    # Setting generic target basename:
+    conf[c_basename]="rootfs"
+else
+    conf[c_backup_source]="${opt_source%/}"         # Removing trailing /
+    # Setting generic target basename:
+    conf[c_basename]="${conf[c_backup_source]#/}"   # Removing leading /
+    conf[c_basename]="${conf[c_basename]//\//_}"    # Replace '/' by '_'
+    conf[c_basename]="${conf[c_basename]##+(_)}"
+fi
+
+
+# Checking target_dir parameter
+if [[ -n $2 || -n $opt_info ]]; then
+    opt_target="$2"
+fi
+if [[ -z $opt_target ]]; then
+    error "No target directory given!"
+    usage
+    exit 1
+fi
+if [[ ! -d $opt_target ]]; then
+    error "Target directory $opt_target does not exist or is not a directory!"
+elif [[ ! -w $opt_target ]]; then
+    error "Target directory $opt_target is not writeable!"
+fi
+conf[c_backup_destination]="${opt_target%/}"
+
+## System Configuration #####################################################
+
+shopt -s extglob
+
+conf[c_date]="$(date '+%Y%m%d_%H%M%S')"
+conf[c_backupfile]="${conf[c_basename]}.${conf[c_date]}"
+conf[c_diff_file]="${conf[c_basename]}.diff.${conf[c_date]}"
+conf[c_cat_latest_file]="${conf[c_basename]}.last.cat"
+conf[c_cat_new_file]="${conf[c_backupfile]}.cat"
+conf[c_cat_diff_new_file]="${conf[c_diff_file]}.cat"
+
+conf[c_backup_path]="${conf[c_backup_destination]}/${conf[c_backupfile]}"
+conf[c_diff_path]="${conf[c_backup_destination]}/${conf[c_diff_file]}"
+conf[c_cat_latest_path]="${conf[c_backup_destination]}/${conf[c_cat_latest_file]}"
+conf[c_cat_new_path]="${conf[c_backup_destination]}/${conf[c_cat_new_file]}"
+conf[c_cat_diff_new_path]="${conf[c_backup_destination]}/${conf[c_cat_diff_new_file]}"
+
+daropt_cipher="blowfish:"
+daropt_others="--beep --compression=bzip2 --verbose"
+
+
+# Removing spaces:
+read -r conf[c_empty_dirs] <<< "${conf[c_empty_dirs]//+([[:space:]]|$'\n')/ }"
+read -r conf[c_exclude_compress] <<< "${conf[c_exclude_compress]//+([[:space:]]|$'\n')/ }"
+read -r conf[c_exclude_dirs] <<< "${conf[c_exclude_dirs]//+([[:space:]]|$'\n')/ }"
+read -r conf[c_exclude_files] <<< "${conf[c_exclude_files]//+([[:space:]]|$'\n')/ }"
+
+# Splitting spaces for -Z, if config variable is not empty:
+daropt_string_empty_dirs="${conf[c_empty_dirs]:+-D ${conf[c_empty_dirs]// /' -D '}}"
+daropt_string_exclude_compress="${conf[c_exclude_compress]:+-Z ${conf[c_exclude_compress]// /' -Z '}}"
+daropt_string_exclude_dirs="${conf[c_exclude_dirs]:+-P ${conf[c_exclude_dirs]// /' -P '}}"
+#daropt_string_exclude_files="${conf[c_exclude_files]:+-X '${conf[c_exclude_files]// /' -X '}'}"
+ daropt_string_exclude_files="${conf[c_exclude_files]:+-X ${conf[c_exclude_files]// /' -X '}}"
+
+#############################################################################
+
+
+if [[ -n $opt_info ]]; then
+    print_config
+    exit 0
+fi
+
+renice ${conf[c_nice]} $$ >/dev/null
+echo "Backup target: ${conf[c_basename]}"
+if [[ -z $opt_full && -r "${conf[c_cat_latest_path]}.1.dar" ]]; then
+    echo "Continuing with differential backup..."
+    eval_command="$dar_bin \
+        --create ${conf[c_diff_path]} \
+        --fs-root ${conf[c_backup_source]} \
+        --ref ${conf[c_cat_latest_path]} \
+        --on-fly-isolate ${conf[c_cat_diff_new_path]} \
+        --execute \"ln -sfv ${conf[c_cat_diff_new_file]}.%n.dar ${conf[c_cat_latest_path]}.1.dar\" \
+        ${conf[c_backup_onefilesystem]:+--no-mount-points} \
+        ${opt_crypt:+ --key $daropt_cipher} \
+        ${conf[c_slice]:+--slice ${conf[c_slice]}} \
+        $daropt_others $daropt_string_exclude_compress $daropt_string_exclude_dirs $daropt_string_empty_dirs $daropt_string_exclude_files"
+        debug "Evaluating $eval_command"
+        eval "$eval_command"
+
+        # Encrypting the catalog and deleting the unencrypted:
+        if (( $? == 0 )) && [[ -n $opt_crypt ]]; then
+            eval_command="$dar_bin \
+                --key $daropt_cipher \
+                --isolate ${conf[c_cat_latest_path]} \
+                --ref ${conf[c_cat_new_path]} &&\
+            rm -vf ${conf[c_cat_new_path]}.1.dar"
+            debug "Evaluating $eval_command"
+            eval "$eval_command"
+        fi
+else
+    echo "Initiating complete backup..."
+    eval_command="$dar_bin \
+        --create \"${conf[c_backup_path]}\" \
+        --fs-root \"${conf[c_backup_source]}\" \
+        --on-fly-isolate \"${conf[c_cat_new_path]}\" \
+        --execute \"ln -sfv ${conf[c_cat_new_file]}.%n.dar ${conf[c_cat_latest_path]}.1.dar\" \
+        ${conf[c_backup_onefilesystem]:+--no-mount-points} \
+        ${opt_crypt:+ --key $daropt_cipher} \
+        ${conf[c_slice]:+--slice ${conf[c_slice]}} \
+        $daropt_others $daropt_string_exclude_compress $daropt_string_exclude_dirs $daropt_string_empty_dirs $daropt_string_exclude_files"
+        debug "Evaluating $eval_command"
+        eval "$eval_command"
+        
+        # Encrypting the catalog and deleting the unencrypted:
+        if (( $? == 0 )) && [[ -n $opt_crypt ]]; then
+            $dar_bin \
+                --key $daropt_cipher \
+                --isolate ${conf[c_cat_latest_path]} \
+                --ref ${conf[c_cat_new_path]} &&\
+            rm -vf ${conf[c_cat_new_path]}.1.dar
+        fi
+fi
+

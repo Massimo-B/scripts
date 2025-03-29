@@ -1,0 +1,178 @@
+#!/usr/bin/env bash
+# vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
+#############################################################################
+# $HGFile: compress_pictures $
+# $HGLocation: /home/mb/src/tools $
+
+# 1st Author: Massimo
+# Created: 2012-10-24
+
+# $HGChecked in by: massimo $
+# $HGDate: 2018-01-04 11:30 +0100 $
+version='$HGRevision: 9 $'
+# $HGBranch:  $
+# $HGDesc: updates $
+#############################################################################
+
+# Checking Bash version
+(( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
+
+## User Configuration #######################################################
+declare -A conf tmp
+conf[c_nice]="15"
+
+#############################################################################
+
+this_basename="${0##*/}"
+this_dirname="${0%/*}"
+
+usage() {
+    cat <<EOF
+This is $0 $version
+
+Usage: $0 [OPTIONS] <target files>
+
+Description
+Compressing target picture files.
+By default conversion is only done if new size is lower than original. This can be overridden by --force.
+
+Options:
+    -c, --case              Case sensitive, insensitive by default to catch .JPG and .jpg
+    -r, --resize <num>      Resize to xx, only if bigger ( like convert -resize $numx$num\> )
+    -q, --quality <num>     convert quality in %
+    -k, --keep              keep new files and don't overwrite old ones
+    -f, --force             force conversion and skip checking original size
+
+    -v, --verbose           Explain what commands are being run
+    -i, --info              Show configuration information
+    -d, --debug             Debugging mode
+    -h, --help              Show this help
+
+EOF
+}
+
+print_config() {
+    for key in ${!conf[@]}; do
+        printf "%-20s = %s\n" "${key#c_}" "${conf[$key]}"
+    done | sort
+}
+
+while [[ $1 == -* ]]; do
+    case "$1" in
+        -c|--case)      opt_case=1;     shift;;
+        -r|--resize)    shift
+                        if [[ $1 == -* || -z $1 ]]; then
+                            die "No resize number given"
+                        fi
+                        opt_resize="$1"
+                        shift;;
+        -q|--quality)   shift
+                        if [[ $1 == -* || -z $1 ]]; then
+                            die "No quality number given"
+                        fi
+                        opt_quality="$1"
+                        shift;;
+        -k|--keep)      opt_keep=1;     shift;;
+        -f|--force)     opt_force=1;    shift;;
+        -d|--debug)     opt_debug=1;    shift;;
+        -i|--info)      opt_info=1;     shift;;
+        -v|--verbose)   opt_verbose=1;  shift;;
+        -h|--help|-\?)  usage;          exit 0;;
+        # Trying to pass unkown options to convert:
+        -*)             opt_unknown="${opt_unknown} ${1}"
+                        shift
+                        opt_unknown="${opt_unknown} ${1}"
+                        shift;;
+    esac
+done
+
+# Libraries
+libs=( output )
+for lib in "${libs[@]}"; do
+    lib_path="${BASH_PREFIX:-/}usr/local/lib/lib_$lib"
+    if [[ -r lib_$lib ]]; then
+        source "lib_$lib"
+        continue
+    elif [[ -r ${this_dirname}/lib_$lib ]]; then
+        source "${this_dirname}/lib_$lib"
+        continue
+    elif [[ -r "$lib_path" ]]; then
+        source "$lib_path"
+        continue
+    else
+        echo "$lib_path not found" 1>&2; exit 1;
+    fi
+done
+
+# Checking for binary
+identify_bin="$(type -P identify)" || die "identify binary not found"
+convert_bin="$(type -P convert)" || die "convert binary not found"
+
+if [[ -z $1 ]]; then
+    error "No target files given!"
+    usage
+    exit 1
+fi
+
+[[ -z $opt_case ]] && shopt -s nocaseglob
+shopt -s nullglob
+
+tmpdir="${this_basename}.$BASHPID"
+mkdir $tmpdir && 
+for file in "$@"; do
+    # File checks:
+    if [[ ! -f $file ]]; then
+        warn "$file not found or not a regular file, skipped."
+        continue
+    fi
+    if [[ ! -r $file ]]; then
+        warn "$file is not readable, skipped."
+        continue
+    fi
+    if ! file "$file" |grep JPEG >/dev/null; then
+        warn "$file is not a JPEG file, skipped."
+        continue
+    fi
+
+    file_basename="$(basename "$file")"
+    dim=($(identify -ping -format "%w %h" "$file"))
+    width="${dim[0]}"
+    height="${dim[1]}"
+    eval_command="$convert_bin \
+        \"${file}\" \
+        ${opt_verbose:+ -verbose} \
+        ${opt_quality:+ -quality ${opt_quality}%} \
+        ${opt_resize:+ -resize ${opt_resize}x${opt_resize}\>} \
+        ${opt_unkown:+ ${opt_unknown}} \
+        \"${tmpdir}/${file_basename}\"
+        "
+
+    printf "%s\n=> " "$(identify "$file")"
+
+    if [[ -n $opt_resize ]]; then
+        debug "Resizing file: $file, width:$width, height:$height"
+        # Only resize if picture is bigger:
+        if (( $width > $opt_resize || $height > $opt_resize )) || [[ -n $opt_force ]]; then
+            debug "Evaluating $eval_command"
+            eval "$eval_command" && [[ -z $opt_keep ]] && printf "<= " && mv -fv "${tmpdir}/${file_basename}" "$file"
+        else
+            [[ -n $opt_verbose ]] && echo "Skipping $file, already sized."
+        fi
+    else
+        debug "Evaluating $eval_command"
+        eval "$eval_command"
+    fi
+    echo
+done
+
+if [[ -z $opt_keep ]]; then
+    shopt -s nullglob dotglob
+    left_tmpfiles=($tmpdir/*)
+    if (( ${#left_tmpfiles[*]} )); then
+        error "There are temporary files left: ${left_tmpfiles[@]}"
+    else
+        rmdir -v "$tmpdir"
+    fi
+    shopt -u nullglob dotglob
+fi
+
