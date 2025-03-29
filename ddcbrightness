@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+
+## User Configuration #######################################################
+conf_step=10
+#############################################################################
+
+# Checking Bash version
+(( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
+
+this_basename="${0##*/}"
+this_dirname="${0%/*}"
+
+usage() {
+    cat <<EOF
+Usage: $0 [OPTIONS] <up|down>
+
+Step DDC brightness up or down
+
+    Options:
+
+    -s, --step              step width (1..50), default: $conf_step
+
+    -d, --debug             Debugging mode
+    -h, --help              Show this help
+EOF
+}
+
+# Checking for ddc binary
+ddc_bin="$(type -ap ddcutil)" || die "ddcutil binary not found"
+
+while [[ $1 == -* ]]; do
+    case "$1" in
+        -s|--step)      shift
+                        if [[ $1 == -* || -z $1 ]]; then
+                            die "Missing step width"
+                        fi
+                        if [[ $1 < 1 || $1 > 50 ]]; then
+                            die "Step width should be between 1 and 50"
+                        fi
+                        conf_step="$1"
+                        shift;;
+        -i|--display)   shift
+                        if [[ $1 == -* || -z $1 ]]; then
+                            die "Missing display number"
+                        fi
+                        opt_display="$1"
+                        shift;;
+        -d|--debug)     opt_debug=1;    shift;;
+        -h|--help|-\?)  usage;          exit 0;;
+        -*) echo "invalid option: $1" 1>&2; usage; exit 1;;
+    esac
+done
+
+# Checking action
+if [[ -n $1 ]]; then
+    if [[ $1 == "up" || $1 == "down" ]]; then
+        opt_action="$1"
+    else
+        die "Action must be 'up' or 'down'"
+    fi
+else
+    die "No action passed"
+fi
+
+if [[ -n $opt_display ]];then
+    displays=( $opt_display )
+else
+    readarray -t displays < <(ddcutil detect | awk '/Display/ {print $2}')
+    [[ -n $opt_debug ]] && echo "Found displays: ${displays[@]}"
+fi
+
+if [[ -n $opt_debug ]]; then
+   echo "Action: $opt_action"
+   echo "Display: $opt_display"
+   echo "Step width: $conf_step"
+fi
+
+for display in "${displays[@]}"; do
+    current=$(ddcutil --display $display getvcp 10 | sed -n 's/.*current value *= *\([0-9]\+\).*/\1/p')
+    
+    if [[ $opt_action == "up" ]]; then
+        new=$((current + $conf_step))
+        if [[ "$new" -gt 100 ]]; then
+            new=100
+        fi
+    elif [[ $opt_action == "down" ]]; then
+        new=$((current - $conf_step))
+        if [[ "$new" -lt 0 ]]; then
+            new=0
+        fi
+    else
+        die "Action $opt_action not supported"
+    fi
+    
+    ddcutil --display $display setvcp 10 $new
+    [[ -n $opt_debug ]] && echo "Changed brightness for display $display from $current to $new"
+    type -ap notify-send && notify-send -e -t 4000 -i video-display "Changed brightness for display $display from $current to $new"
+done
