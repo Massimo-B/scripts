@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+
+archivebase="/home/$USER/Pictures/0.ARCHIV"
+
+if [[ ! -d "$archivebase" ]]; then
+    echo "Archive $archivebase not found!"
+    exit 1
+fi
+
+for dir in "$@"; do
+    if [[ ! -d "$dir" ]]; then
+        echo "$dir is not a directory, skipped."
+        continue
+    fi
+    sourcedir="$(readlink -f "$dir")"
+    echo "Source Directory: $sourcedir"
+    targetdir="${sourcedir#/*/*/*/}"
+    echo "Target Directory: $targetdir"
+    archivedir="${archivebase}/${targetdir}"
+    echo "Archive Directory: $archivedir"
+    
+    if [[ ! -d "$archivedir" ]]; then
+        echo "$archivedir not found, creating..."
+        mkdir -p "$archivedir"
+    fi
+    
+    mv -v ${sourcedir}/* ${archivedir}/.
+    rmdir -v "${sourcedir}"
+
+done
