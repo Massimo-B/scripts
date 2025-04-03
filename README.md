@@ -1,7 +1,6 @@
-Collection of unsorted scripts
+# Collection of unsorted scripts
 
-
-
+## ddcbrightness
 Steps DDC brightness up or down for all found DDC displays. DDC brightness means the real physical back lighting.
 
 While laptop screen brightness is already controled directly on most Desktop Environments using special BrightnessUp/Down keys,
