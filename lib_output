@@ -1,0 +1,73 @@
+#
+# vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
+#############################################################################
+# $HGFile: usr/local/lib64/lib_output $
+# $HGLocation: /root/src/main $
+
+# 1st Author: Massimo Burcheri
+# Created: 2012-03-29
+
+# $HGChecked in by: massimo $
+# $HGDate: 2013-07-26 07:42 +0200 $
+# $HGRevision: 567 $
+# $HGBranch: padmburcheri1-linux $
+# $HGDesc: updates $
+#############################################################################
+
+# Avoid multiple sourcing #START ################
+script_id="${BASH_SOURCE##*/}"
+script_id="${script_id%%.*}"
+eval [[ -n \${SOURCED_${script_id}} ]] && return
+#################################################
+
+# Libraries
+libs=( colors )
+for lib in "${libs[@]}"; do
+    lib_path="${BASH_PREFIX:-/}usr/local/lib/lib_$lib"
+    [[ -e "$lib_path" ]] || { echo "$lib_path not found" 1>&2; exit 1; }
+    source "$lib_path"
+done
+
+success() {
+    printf "[${SOURCED_lib_colors:+$COLOR_GREEN}OK${SOURCED_lib_colors:+$COLOR_NONE}] %s\n" "$@" >&2
+}
+
+success_n() {
+    printf "[${SOURCED_lib_colors:+$COLOR_GREEN}OK${SOURCED_lib_colors:+$COLOR_NONE}] %s" "$@" >&2
+}
+
+debug() {
+  [[ -n $opt_debug ]] && printf "[${SOURCED_lib_colors:+$COLOR_BLUE}DEBUG${SOURCED_lib_colors:+$COLOR_NONE}] %s\n" "$@" >&2
+}
+
+debug_n() {
+  [[ -n $opt_debug ]] && printf "[${SOURCED_lib_colors:+$COLOR_BLUE}DEBUG${SOURCED_lib_colors:+$COLOR_NONE}] %s" "$@" >&2
+}
+
+error() {
+    printf "[${SOURCED_lib_colors:+$COLOR_RED}ERROR${SOURCED_lib_colors:+$COLOR_NONE}] %s\n" "$@" >&2
+}
+
+error_n() {
+    printf "[${SOURCED_lib_colors:+$COLOR_RED}ERROR${SOURCED_lib_colors:+$COLOR_NONE}] %s" "$@" >&2
+}
+
+warn() {
+  printf "[${SOURCED_lib_colors:+$COLOR_RED}WARN${SOURCED_lib_colors:+$COLOR_NONE}] %s\n" "$@" >&2
+}
+
+warn_n() {
+  printf "[${SOURCED_lib_colors:+$COLOR_RED}WARN${SOURCED_lib_colors:+$COLOR_NONE}] %s" "$@" >&2
+}
+
+die () {
+  local st="$?"
+  error "$@"
+  exit "$st"
+}
+
+export error
+
+# Avoid multiple sourcing #END ##################
+eval export SOURCED_${script_id}=1
+#################################################

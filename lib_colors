@@ -1,0 +1,52 @@
+# vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
+#############################################################################
+# $HGFile: usr/local/lib64/lib_colors $
+# $HGLocation: /root/src/main $
+
+# 1st Author: Massimo Burcheri
+# Created: 2011-12-14
+
+# $HGChecked in by: massimo $
+# $HGDate: 2016-01-19 15:33 +0100 $
+# $HGRevision: 799 $
+# $HGBranch: vmgentoo-mb $
+# $HGDesc: updates $
+#############################################################################
+
+# Avoid multiple sourcing #START ############################################
+script_id="${BASH_SOURCE}"
+script_id="${script_id//\//_}"
+script_id="${script_id//./_}"
+#eval [[ -n \${SOURCED_${script_id}} ]] && return
+#############################################################################
+
+# Process output ############################################################
+if [[ $- = *i* ]] ; then
+    # Shell is interactive...
+    echo "Loading $BASH_SOURCE ..."
+else
+    return
+fi
+#############################################################################
+
+
+export COLOR_BACK_DARKGREY=$(tput setab 238)
+export COLOR_BACK_GREY=$(tput setab 235)
+export COLOR_BLACK=$(tput setaf 16)
+export COLOR_BLUE=$(tput setaf 4)
+export COLOR_BLUE=$(tput setaf 4; tput bold)
+export COLOR_BOLD=$(tput bold)
+export COLOR_DARKGREY=$(tput setaf 238)
+export COLOR_DIM=$(tput dim)
+export COLOR_GREEN=$(tput setaf 2)
+export COLOR_GREY=$(tput setaf 235)
+export COLOR_INV=$(tput smso)
+export COLOR_NONE=$(tput sgr0)
+export COLOR_PURPLE=$(tput setaf 5)
+export COLOR_RED=$(tput setaf 1)
+export COLOR_UL=$(tput smul)
+
+
+# Avoid multiple sourcing #END ##################
+eval export SOURCED_${script_id}=1
+#################################################
