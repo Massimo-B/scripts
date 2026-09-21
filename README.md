@@ -83,11 +83,11 @@ keys, custom scripts, and installed package lists, are not included.
 
 ```bash
 ./openwrt_fetchconfig root@192.168.1.1 /path/to/router-config-repo
-./openwrt_fetchconfig --dest upstairs upstairs-router /path/to/router-config-repo
+./openwrt_fetchconfig --name upstairs upstairs-router /path/to/router-config-repo
 ```
 
 The default destination is `openwrt/etc/config` inside the repository root;
-`--dest upstairs` uses `upstairs/etc/config`. Use a different destination for each router.
+`--name upstairs` uses `upstairs/etc/config`. Use a different name for each router.
 For a custom SSH port or identity, define an alias in `~/.ssh/config` and pass it
 as the host. The remote account must be able to read the configuration files.
 

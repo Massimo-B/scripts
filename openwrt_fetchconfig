@@ -5,10 +5,10 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_fetchconfig [--dest DEST] SSH_HOST REPOSITORY
+Usage: openwrt_fetchconfig [--name NAME] SSH_HOST REPOSITORY
 
-Copy /etc/config from OpenWrt over SSH into REPOSITORY/DEST/etc/config.
-DEST defaults to openwrt. Use distinct destinations when fetching from multiple routers.
+Copy /etc/config from OpenWrt over SSH into REPOSITORY/NAME/etc/config.
+NAME defaults to openwrt. Use distinct names when fetching from multiple routers.
 SSH_HOST can be root@192.168.1.1 or an alias from ~/.ssh/config (including its
 configured user, port, and identity file).
 
@@ -17,19 +17,19 @@ also removed locally. Local edits there are overwritten. Nothing is staged,
 committed, or pushed. Configuration files may contain passwords and keys.
 
 Options:
-  --dest DEST  Destination directory name inside the repository
+  --name NAME  Destination directory name inside the repository
   -h, --help   Show this help
 EOF
 }
 
 die() { printf 'openwrt_fetchconfig: %s\n' "$*" >&2; exit 1; }
 
-dest=openwrt
+name=openwrt
 while (($#)); do
     case "$1" in
-        --dest)
-            (($# >= 2)) || die '--dest requires a value'
-            dest=$2
+        --name)
+            (($# >= 2)) || die '--name requires a value'
+            name=$2
             shift 2
             ;;
         -h|--help) usage; exit 0 ;;
@@ -39,7 +39,7 @@ while (($#)); do
     esac
 done
 (($# == 2)) || { usage >&2; exit 1; }
-[[ "$dest" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'DEST must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
+[[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'NAME must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
 for command in ssh git tar rsync mktemp realpath; do
@@ -47,9 +47,9 @@ for command in ssh git tar rsync mktemp realpath; do
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
 repo=$(realpath -- "$repo")
-destination="$repo/$dest/etc/config"
+destination="$repo/$name/etc/config"
 # Refuse symlinked parents so the mirror cannot write outside the repository.
-for path in "$repo/$dest" "$repo/$dest/etc" "$destination"; do
+for path in "$repo/$name" "$repo/$name/etc" "$destination"; do
     [[ ! -L "$path" ]] || die "Destination must not be a symbolic link: $path"
     [[ ! -e "$path" || -d "$path" ]] || die "Destination is not a directory: $path"
 done
@@ -83,4 +83,4 @@ mkdir -p -- "$destination"
 # Protect any local Git metadata even if a nested repository exists here.
 rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_config/" "$destination/"
 printf 'Copied configuration to %s\n' "$destination"
-git -C "$repo" status --short -- "$dest/etc/config"
+git -C "$repo" status --short -- "$name/etc/config"
