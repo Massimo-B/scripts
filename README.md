@@ -9,6 +9,7 @@ target Linux and use GNU command-line utilities; use Bash 4 or newer.
 | File | Purpose |
 | --- | --- |
 | [archivePictureDir](#archivepicturedir) | Move picture directories into a personal archive. |
+| [openwrt_fetchconfig](#openwrt_fetchconfig) | Copy essential OpenWrt configuration over SSH into Git. |
 | [compress_pictures](#compress_pictures) | Resize and recompress JPEG images with ImageMagick. |
 | [dar_wrapper](#dar_wrapper) | Create full and subsequent backups with DAR. |
 | [ddcbrightness](#ddcbrightness) | Adjust external monitor backlight brightness over DDC/CI. |
@@ -69,6 +70,40 @@ source path. For user `alice`, the example moves files into
 This moves files rather than copying them. Hidden entries remain in the source,
 preventing its removal. The move command uses unquoted paths, so directory names
 containing spaces are not supported reliably.
+
+### openwrt_fetchconfig
+
+[Source](openwrt_fetchconfig) · Dependencies: OpenSSH `ssh`, Git, GNU `tar`, `rsync`,
+`mktemp`, and GNU `realpath` locally; SSH access and `tar` on the router.
+
+Copies `/etc/config`, containing the main network, Wi-Fi, firewall, DHCP, and
+system settings, into an existing local Git working tree. This is a configuration
+snapshot, not a complete system backup; files outside `/etc/config`, such as SSH
+keys, custom scripts, and installed package lists, are not included.
+
+```bash
+./openwrt_fetchconfig root@192.168.1.1 /path/to/router-config-repo
+./openwrt_fetchconfig --dest upstairs upstairs-router /path/to/router-config-repo
+```
+
+The default destination is `openwrt/etc/config` inside the repository root;
+`--dest upstairs` uses `upstairs/etc/config`. Use a different destination for each router.
+For a custom SSH port or identity, define an alias in `~/.ssh/config` and pass it
+as the host. The remote account must be able to read the configuration files.
+
+Each run mirrors the router's files, overwriting local edits and removing files
+that no longer exist remotely in that destination. Downloads and extraction
+finish before the destination is updated. The script displays Git status but
+does not stage, commit, or push. Review and commit the snapshot yourself:
+
+```bash
+git -C /path/to/router-config-repo diff -- openwrt/etc/config
+git -C /path/to/router-config-repo add -- openwrt/etc/config
+git -C /path/to/router-config-repo commit -m "Update OpenWrt configuration"
+```
+
+Configuration files can contain Wi-Fi passwords and other secrets. The local
+copy is restricted to the current user; keep the repository private.
 
 ### compress_pictures
 

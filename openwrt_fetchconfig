@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# Copy OpenWrt's UCI configuration into a local Git working tree.
+set -euo pipefail
+umask 077
+
+usage() {
+    cat <<'EOF'
+Usage: openwrt_fetchconfig [--dest DEST] SSH_HOST REPOSITORY
+
+Copy /etc/config from OpenWrt over SSH into REPOSITORY/DEST/etc/config.
+DEST defaults to openwrt. Use distinct destinations when fetching from multiple routers.
+SSH_HOST can be root@192.168.1.1 or an alias from ~/.ssh/config (including its
+configured user, port, and identity file).
+
+The destination config directory is mirrored: files removed on the router are
+also removed locally. Local edits there are overwritten. Nothing is staged,
+committed, or pushed. Configuration files may contain passwords and keys.
+
+Options:
+  --dest DEST  Destination directory name inside the repository
+  -h, --help   Show this help
+EOF
+}
+
+die() { printf 'openwrt_fetchconfig: %s\n' "$*" >&2; exit 1; }
+
+dest=openwrt
+while (($#)); do
+    case "$1" in
+        --dest)
+            (($# >= 2)) || die '--dest requires a value'
+            dest=$2
+            shift 2
+            ;;
+        -h|--help) usage; exit 0 ;;
+        --) shift; break ;;
+        -*) die "Unknown option: $1" ;;
+        *) break ;;
+    esac
+done
+(($# == 2)) || { usage >&2; exit 1; }
+[[ "$dest" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'DEST must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
+host=$1
+[[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
+for command in ssh git tar rsync mktemp realpath; do
+    command -v "$command" >/dev/null || die "Missing dependency: $command"
+done
+repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
+repo=$(realpath -- "$repo")
+destination="$repo/$dest/etc/config"
+# Refuse symlinked parents so the mirror cannot write outside the repository.
+for path in "$repo/$dest" "$repo/$dest/etc" "$destination"; do
+    [[ ! -L "$path" ]] || die "Destination must not be a symbolic link: $path"
+    [[ ! -e "$path" || -d "$path" ]] || die "Destination is not a directory: $path"
+done
+
+temporary=$(mktemp -d)
+trap 'rm -rf -- "$temporary"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf 'Fetching /etc/config from %s...\n' "$host"
+# Download fully before touching the destination; -T prevents terminal output
+# from corrupting the archive. No scp/SFTP or rsync is needed on the router.
+ssh -T -- "$host" 'tar -czf - -C / etc/config' > "$temporary/config.tar.gz"
+
+# Only accept the requested subtree, and keep Git metadata out of the mirror.
+tar -tzf "$temporary/config.tar.gz" > "$temporary/members"
+while IFS= read -r member; do
+    case "$member" in
+        etc/config|etc/config/|etc/config/*) ;;
+        *) die "Unexpected archive path: $member" ;;
+    esac
+    case "/$member/" in
+        */../*|*/.git/*) die "Unsafe archive path: $member" ;;
+    esac
+done < "$temporary/members"
+mkdir "$temporary/extracted"
+tar -xzf "$temporary/config.tar.gz" -C "$temporary/extracted" --no-same-owner --no-same-permissions
+source_config="$temporary/extracted/etc/config"
+[[ -d "$source_config" && ! -L "$source_config" ]] || die 'Archive does not contain an /etc/config directory'
+mkdir -p -- "$destination"
+# Preserve executable bits and symlinks, but restrict access to the local owner.
+# Protect any local Git metadata even if a nested repository exists here.
+rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_config/" "$destination/"
+printf 'Copied configuration to %s\n' "$destination"
+git -C "$repo" status --short -- "$dest/etc/config"
