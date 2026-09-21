@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
-#############################################################################
-# $HGFile: dar_script $
-# $HGLocation: /home.crypt/mb/src/tools $
-
-# 1st Author: Massimo
-# Created: 2006
-
-# $HGChecked in by: massimo $
-# $HGDate: 2015-07-19 17:39 +0200 $
-# $HGRevision: 6 $
-# $HGBranch:  $
-# $HGDesc: updates $
-#############################################################################
 
 # Checking Bash version
 (( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"

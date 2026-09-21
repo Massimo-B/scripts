@@ -1,17 +1,4 @@
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
-#############################################################################
-# $HGFile: usr/local/lib64/lib_colors $
-# $HGLocation: /root/src/main $
-
-# 1st Author: Massimo Burcheri
-# Created: 2011-12-14
-
-# $HGChecked in by: massimo $
-# $HGDate: 2016-01-19 15:33 +0100 $
-# $HGRevision: 799 $
-# $HGBranch: vmgentoo-mb $
-# $HGDesc: updates $
-#############################################################################
 
 # Avoid multiple sourcing #START ############################################
 script_id="${BASH_SOURCE}"

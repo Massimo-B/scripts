@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
-#############################################################################
-# $HGFile: shrinkpdf $
-# $HGLocation: /home/mb/src/tools $
-
-# 1st Author: Massimo
-# Created: 2012-10-26
-
-# $HGChecked in by: massimo $
-# $HGDate: 2018-09-21 14:08 +0200 $
-version='$HGRevision: 10 $'
-# $HGBranch:  $
-# $HGDesc: Fixed du calculation $
-#############################################################################
 
 # Checking Bash version
 (( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
@@ -34,7 +21,7 @@ done
 
 usage() {
     cat <<EOF
-This is $0 $version
+This is $0
 
 Usage:
     $0 [OPTIONS] <target pdf files>

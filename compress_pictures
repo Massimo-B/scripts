@@ -1,18 +1,5 @@
 #!/usr/bin/env bash
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
-#############################################################################
-# $HGFile: compress_pictures $
-# $HGLocation: /home/mb/src/tools $
-
-# 1st Author: Massimo
-# Created: 2012-10-24
-
-# $HGChecked in by: massimo $
-# $HGDate: 2018-01-04 11:30 +0100 $
-version='$HGRevision: 9 $'
-# $HGBranch:  $
-# $HGDesc: updates $
-#############################################################################
 
 # Checking Bash version
 (( ${BASH_VERSINFO[0]} >= 4 )) || die "This script needs at least bash version 4"
@@ -28,7 +15,7 @@ this_dirname="${0%/*}"
 
 usage() {
     cat <<EOF
-This is $0 $version
+This is $0
 
 Usage: $0 [OPTIONS] <target files>
 
