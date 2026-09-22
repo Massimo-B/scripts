@@ -14,7 +14,10 @@ configured user, port, and identity file).
 
 The destination config directory is mirrored: files removed on the router are
 also removed locally. Local edits there are overwritten. Nothing is staged,
-committed, or pushed. Configuration files may contain passwords and keys.
+committed, or pushed. Common UCI password, key, token, and shared-secret fields
+are replaced with [REDACTED] before copying. Custom secret fields may need to be
+added to the redaction rules. Previously committed secrets remain in Git history.
+The redacted copy is for review, not a complete restorable backup.
 
 Options:
   --name NAME  Destination directory name inside the repository
@@ -42,7 +45,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'NAME must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar rsync mktemp realpath; do
+for command in ssh git tar rsync mktemp realpath python3; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -78,8 +81,77 @@ mkdir "$temporary/extracted"
 tar -xzf "$temporary/config.tar.gz" -C "$temporary/extracted" --no-same-owner --no-same-permissions
 source_config="$temporary/extracted/etc/config"
 [[ -d "$source_config" && ! -L "$source_config" ]] || die 'Archive does not contain an /etc/config directory'
+# Sanitize the private temporary copy before creating or updating the mirror.
+# Parse quoted values (including multiline values) instead of substituting only
+# the first line of a secret. Never print values when reporting parse failures.
+python3 - "$source_config" <<'PY'
+import os
+from pathlib import Path
+import re
+import shlex
+import stat
+import sys
+
+
+def sensitive(name):
+    name = name.lower()
+    return (
+        any(part in name for part in (
+            "password", "passwd", "passphrase", "secret", "token", "credential",
+        ))
+        or re.search(r"(?:^|_)(?:key\d*|psk|pin|community)(?:_|$)", name)
+        or name in {"pwd", "pass", "privatekey", "presharedkey"}
+    )
+
+
+def redact(path):
+    result = []
+    pending = ""
+    with path.open(encoding="utf-8", errors="surrogateescape", newline="") as source:
+        for line in source:
+            pending += line
+            try:
+                fields = shlex.split(pending, comments=True, posix=True)
+            except ValueError:
+                # A quoted or escaped value can continue onto the next line.
+                continue
+            trailing = len(pending.rstrip("\r\n")) - len(pending.rstrip("\r\n").rstrip("\\"))
+            if pending.endswith("\n") and trailing % 2:
+                continue
+            if fields:
+                command = fields[0]
+                if not (
+                    (command in {"option", "list"} and len(fields) == 3)
+                    or (command == "config" and len(fields) in {2, 3})
+                    or (command == "package" and len(fields) == 2)
+                ):
+                    raise ValueError("Unsupported UCI statement")
+                if command in {"option", "list"} and sensitive(fields[1]):
+                    indent = re.match(r"[ \t]*", pending).group()
+                    pending = f"{indent}{command} {shlex.quote(fields[1])} '[REDACTED]'\n"
+            result.append(pending)
+            pending = ""
+    if pending:
+        raise ValueError("Incomplete UCI statement")
+    with path.open("w", encoding="utf-8", errors="surrogateescape", newline="") as target:
+        target.write("".join(result))
+
+
+try:
+    for root, directories, files in os.walk(sys.argv[1], followlinks=False):
+        for name in directories + files:
+            path = Path(root) / name
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                continue
+            if not stat.S_ISREG(mode):
+                raise ValueError("Non-regular configuration file")
+            redact(path)
+except (OSError, ValueError):
+    sys.exit("openwrt_fetchconfig: Cannot safely redact configuration; destination unchanged")
+PY
 mkdir -p -- "$destination"
-# Preserve executable bits and symlinks, but restrict access to the local owner.
+# Preserve executable bits, but restrict access to the local owner.
 # Protect any local Git metadata even if a nested repository exists here.
 rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_config/" "$destination/"
 printf 'Copied configuration to %s\n' "$destination"
