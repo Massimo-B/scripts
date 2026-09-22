@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""Upload UCI configuration, retaining redacted secrets, then reload services."""
+import argparse
+import io
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tarfile
+
+
+REMOTE_INSTALL = r'''
+set -eu
+umask 077
+fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
+for tool in uci tar cmp mktemp cp mv nohup; do
+    command -v "$tool" >/dev/null || fail "Missing router dependency: $tool"
+done
+test -x /sbin/reload_config || fail 'Missing /sbin/reload_config'
+mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
+work=
+backup=
+installing=0
+cleanup() {
+    status=$?
+    trap - EXIT
+    if [ "$installing" = 1 ]; then
+        for file in "$work"/new/*; do
+            name=${file##*/}
+            if [ -f "$backup/config/$name" ]; then
+                cp -p "$backup/config/$name" "/etc/config/$name" || status=1
+            else
+                rm -f "/etc/config/$name" || status=1
+            fi
+        done
+        echo "openwrt_pushconfig: Installation failed; attempted restore from $backup" >&2
+    fi
+    rm -f /etc/config/.openwrt_pushconfig.$$
+    [ -z "$work" ] || rm -rf "$work"
+    rmdir /tmp/openwrt-pushconfig.lock
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+work=$(mktemp -d /tmp/openwrt-pushconfig.XXXXXX)
+tar -xzf - -C "$work"
+mkdir "$work/delta"
+changes=$(uci changes 2>/dev/null) || fail 'Cannot inspect pending UCI changes'
+[ -z "$changes" ] || fail 'Commit or revert pending UCI changes first'
+for file in "$work"/new/*; do
+    name=${file##*/}
+    target=/etc/config/$name
+    [ ! -L "$target" ] || fail 'Router configuration contains a symbolic link'
+    if [ -f "$work/old/$name" ]; then
+        cmp -s "$work/old/$name" "$target" || fail 'Router configuration changed during push; pull and retry'
+    else
+        [ ! -e "$target" ] || fail 'Router configuration changed during push; pull and retry'
+    fi
+    uci -c "$work/new" -P "$work/delta" export "$name" >/dev/null 2>&1 || fail "Invalid UCI package: $name"
+done
+backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
+cp -Rp /etc/config "$backup/config"
+installing=1
+for file in "$work"/new/*; do
+    cp "$file" /etc/config/.openwrt_pushconfig.$$
+    chmod 600 /etc/config/.openwrt_pushconfig.$$
+    mv -f /etc/config/.openwrt_pushconfig.$$ "/etc/config/${file##*/}"
+done
+installing=0
+# Let SSH return before network changes can disconnect this session.
+nohup sh -c 'sleep 2; /sbin/reload_config; result=$?; echo "reload_config exit status: $result"; exit "$result"' \
+    >"$backup/apply.log" 2>&1 </dev/null &
+echo "Configuration installed. Backup: $backup/config"
+echo "Service reload scheduled; router log: $backup/apply.log"
+'''
+
+
+def parse(data):
+    """Keep original text and group options by named section or type/index."""
+    statements, sections, counts = [], {}, {}
+    section = None
+    pending = ""
+    for line in data.decode('utf-8', 'surrogateescape').splitlines(keepends=True):
+        pending += line
+        try:
+            fields = shlex.split(pending, comments=True)
+        except ValueError:
+            continue
+        stripped = pending.rstrip('\r\n')
+        if pending.endswith('\n') and (len(stripped) - len(stripped.rstrip('\\'))) % 2:
+            continue
+        if fields:
+            command = fields[0]
+            if command == 'config' and len(fields) in (2, 3):
+                kind = fields[1]
+                index = counts.get(kind, 0)
+                counts[kind] = index + 1
+                section = ('named', fields[2]) if len(fields) == 3 else ('anonymous', kind, index)
+                if section in sections:
+                    raise ValueError('Duplicate section')
+                sections[section] = (kind, {})
+            elif command in ('option', 'list') and len(fields) == 3 and section is not None:
+                options = sections[section][1]
+                entries = options.setdefault(fields[1], [])
+                if entries and (command != 'list' or entries[0][0] != 'list'):
+                    raise ValueError('Duplicate or mixed option declarations')
+                entries.append((command, fields[2]))
+            elif command != 'package' or len(fields) != 2:
+                raise ValueError('Unsupported UCI statement')
+        statements.append((pending, fields, section))
+        pending = ''
+    if pending:
+        raise ValueError('Incomplete UCI statement')
+    return statements, sections
+
+
+def merge(local, current):
+    statements, sections = parse(local)
+    _, previous = parse(current)
+    output, positions = [], {}
+    for raw, fields, section in statements:
+        if fields and fields[0] in ('option', 'list'):
+            command, name, value = fields
+            key = (section, name)
+            index = positions.get(key, 0)
+            positions[key] = index + 1
+            if value == '[REDACTED]':
+                old = previous.get(section)
+                if old is None or old[0] != sections[section][0]:
+                    raise ValueError('Redacted value has no matching router section')
+                if section[0] == 'anonymous' and list(sections) != list(previous):
+                    raise ValueError('Anonymous sections changed; cannot safely match redacted values')
+                entries = old[1].get(name, [])
+                if len(entries) != len(sections[section][1][name]) or entries[index][0] != command:
+                    raise ValueError('Redacted value has no matching router option/list entry')
+                value = entries[index][1]
+                if value == '[REDACTED]':
+                    raise ValueError('Router already contains a redacted placeholder')
+                raw = f'\t{command} {shlex.quote(name)} {shlex.quote(value)}\n'
+        output.append(raw)
+    return ''.join(output).encode('utf-8', 'surrogateescape')
+
+
+def ssh(host, command, **kwargs):
+    return subprocess.run(['ssh', '-T', '--', host, command], check=True, **kwargs)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        'Reads REPOSITORY/NAME/etc/config (NAME defaults to openwrt). '
+        '[REDACTED] retains the corresponding value on the router. '
+        'Do not reorder anonymous sections or redacted list entries. '
+        'Files absent locally are retained on the router. '
+        'Creates a backup under /root and schedules reload_config; network changes may disconnect you.'
+    ))
+    parser.add_argument('--name', default='openwrt')
+    parser.add_argument('ssh_host', metavar='SSH_HOST')
+    parser.add_argument('repository', metavar='REPOSITORY')
+    args = parser.parse_args()
+    if not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9._-]*', args.name):
+        parser.error('Invalid NAME')
+    if not args.ssh_host or args.ssh_host.startswith('-'):
+        parser.error('Invalid SSH host')
+    for tool in ('ssh', 'git'):
+        if not shutil.which(tool):
+            raise ValueError(f'Missing dependency: {tool}')
+    repo = Path(subprocess.check_output(
+        ['git', '-C', args.repository, 'rev-parse', '--show-toplevel'], text=True
+    ).strip()).resolve()
+    source = repo / args.name / 'etc' / 'config'
+    for path in (repo / args.name, source.parent, source):
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError('Configuration path must contain only real directories')
+    local = {}
+    for path in sorted(source.iterdir()):
+        if path.name == '.git':
+            continue
+        if not re.fullmatch(r'[a-zA-Z0-9_]+', path.name) or path.is_symlink() or not path.is_file():
+            raise ValueError('Expected regular UCI package files with alphanumeric/underscore names')
+        local[path.name] = path.read_bytes()
+        parse(local[path.name])
+    if not local:
+        raise ValueError('No configuration files to push')
+    print(f'Reading current configuration from {args.ssh_host}...', flush=True)
+    snapshot = ssh(args.ssh_host, 'tar -czf - -C / etc/config', stdout=subprocess.PIPE).stdout
+    current = {}
+    # Read archive members directly; never extract router-controlled paths locally.
+    with tarfile.open(fileobj=io.BytesIO(snapshot), mode='r:gz') as archive:
+        for member in archive:
+            if member.isdir() and member.name.rstrip('/') == 'etc/config':
+                continue
+            if not member.isfile() or not re.fullmatch(r'etc/config/[a-zA-Z0-9_]+', member.name):
+                raise ValueError('Router archive contains unsupported files')
+            name = member.name.rsplit('/', 1)[1]
+            if name in current:
+                raise ValueError('Duplicate router archive entry')
+            current[name] = archive.extractfile(member).read()
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode='w:gz') as archive:
+        for name, data in local.items():
+            merged = merge(data, current.get(name, b''))
+            for prefix, content in [('new', merged)] + ([('old', current[name])] if name in current else []):
+                member = tarfile.TarInfo(f'{prefix}/{name}')
+                member.mode = 0o600
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+    print(f'Uploading {len(local)} configuration package(s)...', flush=True)
+    ssh(args.ssh_host, 'sh -c ' + shlex.quote(REMOTE_INSTALL), input=payload.getvalue())
+
+
+if __name__ == '__main__':
+    os.umask(0o077)
+    try:
+        main()
+    except ValueError as error:
+        sys.exit(f'openwrt_pushconfig: {error}')
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError):
+        sys.exit('openwrt_pushconfig: File operation or SSH command failed; check router state if upload started')

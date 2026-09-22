@@ -5,7 +5,7 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_fetchconfig [--name NAME] SSH_HOST REPOSITORY
+Usage: openwrt_pullconfig [--name NAME] SSH_HOST REPOSITORY
 
 Copy /etc/config from OpenWrt over SSH into REPOSITORY/NAME/etc/config.
 NAME defaults to openwrt. Use distinct names when fetching from multiple routers.
@@ -25,7 +25,7 @@ Options:
 EOF
 }
 
-die() { printf 'openwrt_fetchconfig: %s\n' "$*" >&2; exit 1; }
+die() { printf 'openwrt_pullconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
 while (($#)); do
@@ -148,7 +148,7 @@ try:
                 raise ValueError("Non-regular configuration file")
             redact(path)
 except (OSError, ValueError):
-    sys.exit("openwrt_fetchconfig: Cannot safely redact configuration; destination unchanged")
+    sys.exit("openwrt_pullconfig: Cannot safely redact configuration; destination unchanged")
 PY
 mkdir -p -- "$destination"
 # Preserve executable bits, but restrict access to the local owner.
