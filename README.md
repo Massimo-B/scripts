@@ -10,7 +10,7 @@ target Linux and use GNU command-line utilities; use Bash 4 or newer.
 | --- | --- |
 | [archivePictureDir](#archivepicturedir) | Move picture directories into a personal archive. |
 | [openwrt_pullconfig](#openwrt_pullconfig) | Copy essential OpenWrt configuration over SSH into Git. |
-| [openwrt_pushconfig](#openwrt_pushconfig) | Upload configuration, preserve redacted secrets, and apply it. |
+| [openwrt_pushconfig](#openwrt_pushconfig) | Upload unchanged configuration files and apply them. |
 | [compress_pictures](#compress_pictures) | Resize and recompress JPEG images with ImageMagick. |
 | [dar_wrapper](#dar_wrapper) | Create full and subsequent backups with DAR. |
 | [ddcbrightness](#ddcbrightness) | Adjust external monitor backlight brightness over DDC/CI. |
@@ -104,7 +104,8 @@ containing spaces are not supported reliably.
 ### openwrt_pullconfig
 
 [Source](openwrt_pullconfig) · Dependencies: OpenSSH `ssh`, Git, GNU `tar`, `rsync`,
-`mktemp`, GNU `realpath`, and Python 3 locally; SSH access and `tar` on the router.
+`mktemp`, and GNU `realpath` locally; SSH access and `tar` on the router.
+The script is Bash; Python is not required.
 
 Copies `/etc/config`, containing the main network, Wi-Fi, firewall, DHCP, and
 system settings, into an existing local Git working tree. This is a configuration
@@ -132,52 +133,48 @@ git -C /path/to/router-config-repo add -- openwrt/etc/config
 git -C /path/to/router-config-repo commit -m "Update OpenWrt configuration"
 ```
 
-Common password, key, token, and shared-secret fields become `[REDACTED]` before
-copying into the repository. Custom secret fields and comments may still contain
-sensitive data; review before committing. Previously committed secrets remain in
-Git history. The local copy is restricted to the current user.
+All file contents are copied unchanged, including passwords, keys, and comments.
+The local copy is restricted to the current user. Only regular UCI package files
+with alphanumeric/underscore filenames are accepted; links and nested directories
+are rejected.
 
 ### openwrt_pushconfig
 
-[Source](openwrt_pushconfig) · Dependencies: Python 3, OpenSSH `ssh`, and Git locally;
-root SSH access, UCI, `ubus`, `tar`, and standard BusyBox utilities
-on the router. Python is not required on the router.
+[Source](openwrt_pushconfig) · Dependencies: Bash, OpenSSH `ssh`, Git, GNU `tar`,
+`mktemp`, GNU `realpath`, and `grep` locally; root SSH access, UCI, `ubus`, `tar`,
+and standard shell utilities on the router. Neither Python nor `nohup` is needed.
 
 ```bash
 ./openwrt_pushconfig root@192.168.1.1 /path/to/router-config-repo
-./openwrt_pushconfig --name upstairs upstairs-router /path/to/router-config-repo
+./openwrt_pushconfig --name corewrt root@10.10.20.1 /path/to/router-config-repo
 ```
 
 Reads the same `NAME/etc/config` directory as `openwrt_pullconfig`. Edit the local
-files, then push to install and apply them. Each `[REDACTED]` option or list entry
-is replaced with its current router value in memory; secrets are not written back
-into the repository. To change a secret, replace its placeholder with the actual
-new value locally, and avoid committing that value.
+files, then push to install and apply them. Files are copied byte for byte,
+including secrets; no values are redacted, merged, or rewritten.
 
-Named sections match by name and type. Anonymous sections match by type and
-position, and lists by entry position: **do not reorder anonymous sections or
-redacted list entries**. Missing secret matches, changed section layouts around
-anonymous placeholders, and mismatched list lengths stop the push. New sections
-must supply actual secret values. Push accepts regular UCI files directly inside
-`etc/config`, with alphanumeric/underscore filenames; symlinks are rejected.
+Snapshots created by the previous scripts may still contain `[REDACTED]`.
+Push rejects these files. Restore the actual values before pushing, or save your
+local edits separately, pull a fresh complete snapshot, and reapply your edits.
+Pull overwrites local edits.
 
-The script validates every uploaded package with the router's UCI parser before
-installation, refuses pending UCI changes, and checks that the target files have
-not changed since download. Files absent locally remain on the router; options
+The router validates every uploaded package with UCI and refuses pending UCI
+changes before installation. Files absent locally remain on the router; options
 and sections removed from uploaded files are removed. A private backup of
 `/etc/config` is created under `/root/openwrt-config-backup.XXXXXX/config` before
 installation. An installation failure attempts to restore the affected files.
 
-After installation, the script verifies the installed files and schedules a
-`config.change` service event through `ubus` for each uploaded package after a
-short delay. These are the same notifications used by
-[`reload_config`](https://github.com/openwrt/openwrt/blob/main/package/system/procd/files/reload_config),
-but do not depend on its checksum cache and also cover newly added packages.
-Services must handle these events to reload automatically.
-Network or Wi-Fi changes may disconnect clients or
-change the router's address. The printed backup directory contains `apply.log`
-with the notification results; successful upload does not verify service
-health or connectivity, and there is no automatic rollback after a reload.
+After writing each file, the script compares it with the upload. Only then does
+it report `Configuration installed and verified`. The initial `Uploading ...`
+message announces the transfer attempt and does not confirm installation.
+
+The script schedules a `config.change` service event through `ubus` for each
+uploaded package after a short delay. A background shell ignores hangup signals
+and redirects its input/output, so it needs no `nohup` executable. Services must
+handle these events to reload automatically. Network or Wi-Fi changes may
+disconnect clients or change the router's address. The printed backup directory
+contains `apply.log` with notification results; successful upload does not verify
+service health or connectivity, and there is no automatic rollback after a reload.
 
 ### compress_pictures
 

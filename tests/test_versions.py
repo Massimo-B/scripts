@@ -1,9 +1,9 @@
 # BEGIN SCRIPT VERSION
-# Source version: 2026-10-06 (Git 2287820)
+# Source version: 2026-10-06 (Git ca1910e+dirty)
 if __name__ == '__main__':
     import sys
     if sys.argv[1:2] == ['--version']:
-        print('test_versions.py 2026-10-06 (Git 2287820)')
+        print('test_versions.py 2026-10-06 (Git ca1910e+dirty)')
         sys.exit(0)
 # END SCRIPT VERSION
 import os
@@ -30,7 +30,7 @@ class VersionTests(unittest.TestCase):
                 with self.subTest(script=path.name):
                     copy = Path(temp) / path.name
                     shutil.copy2(path, copy)
-                    interpreter = sys.executable if path.suffix == '.py' or path.name == 'openwrt_pushconfig' else BASH
+                    interpreter = sys.executable if path.suffix == '.py' else BASH
                     result = subprocess.run([interpreter, str(copy), '--version'], cwd=temp,
                                             env=dict(os.environ, PATH=''), capture_output=True, text=True)
                     self.assertEqual(result.returncode, 0, result.stderr)
