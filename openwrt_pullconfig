@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # BEGIN SCRIPT VERSION
-# Source version: 2026-09-22 (Git 4968abb+dirty)
+# Source version: 2026-10-06 (Git 2287820)
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
-    printf '%s %s (Git %s)\n' 'openwrt_pullconfig' '2026-09-22' '4968abb+dirty'
+    printf '%s %s (Git %s)\n' 'openwrt_pullconfig' '2026-10-06' '2287820'
     exit 0
 fi
 # END SCRIPT VERSION

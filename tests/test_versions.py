@@ -1,9 +1,9 @@
 # BEGIN SCRIPT VERSION
-# Source version: 2026-10-06 (Git ecd60a4+uncommitted)
+# Source version: 2026-10-06 (Git 2287820)
 if __name__ == '__main__':
     import sys
     if sys.argv[1:2] == ['--version']:
-        print('test_versions.py 2026-10-06 (Git ecd60a4+uncommitted)')
+        print('test_versions.py 2026-10-06 (Git 2287820)')
         sys.exit(0)
 # END SCRIPT VERSION
 import os

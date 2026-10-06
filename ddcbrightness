@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # BEGIN SCRIPT VERSION
-# Source version: 2025-04-03 (Git 383b2b2+dirty)
+# Source version: 2026-10-06 (Git 2287820)
 if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
-    printf '%s %s (Git %s)\n' 'ddcbrightness' '2025-04-03' '383b2b2+dirty'
+    printf '%s %s (Git %s)\n' 'ddcbrightness' '2026-10-06' '2287820'
     exit 0
 fi
 # END SCRIPT VERSION
