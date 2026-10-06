@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2026-09-22 (Git f2855ff+dirty)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'dar_wrapper' '2026-09-22' 'f2855ff+dirty'
+    exit 0
+fi
+# END SCRIPT VERSION
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
 
 # Checking Bash version
@@ -76,6 +83,7 @@ The filename in <target_dir> will be generated from path <source_root_dir>.
     -f, --full              Force full backup even when differential backup is possible
     -i, --info              Show configuration information
     -d, --debug             Debugging mode
+    --version              Show source date and Git commit ID
     -h, --help              Show this help
 
    [-c, --crypt             Encrypt archives (currently not supported)]

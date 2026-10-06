@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2025-04-03 (Git 383b2b2+dirty)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'ddcbrightness' '2025-04-03' '383b2b2+dirty'
+    exit 0
+fi
+# END SCRIPT VERSION
 
 ## User Configuration #######################################################
 conf_step=10
@@ -31,6 +38,7 @@ Inceasing all found displays brightness by 10 steps
     -s, --step              step width (1..50), default: $conf_step
 
     -d, --debug             Debugging mode
+    --version              Show source date and Git commit ID
     -h, --help              Show this help
 EOF
 }

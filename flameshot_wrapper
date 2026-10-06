@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2025-03-30 (Git 07195eb)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'flameshot_wrapper' '2025-03-30' '07195eb'
+    exit 0
+fi
+# END SCRIPT VERSION
 
 if [ "$1" = "activewindow" ]; then
 	# Get active window geometry

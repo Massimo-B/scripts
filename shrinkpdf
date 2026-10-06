@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2026-09-22 (Git f2855ff+dirty)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'shrinkpdf' '2026-09-22' 'f2855ff+dirty'
+    exit 0
+fi
+# END SCRIPT VERSION
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
 
 # Checking Bash version
@@ -36,6 +43,7 @@ Options:
     -k, --keep              keep new files and don't overwrite old ones
     -p, --pdfsetting        PDFSETTINGS, with decreasing quality: default, prepress, printer, ebook, screen
     -v, --verbose           Verbose
+    --version              Show source date and Git commit ID
     -h, --help              Show this help
 
 Dependencies:

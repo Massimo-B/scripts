@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2026-09-22 (Git f2855ff+dirty)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'compress_pictures' '2026-09-22' 'f2855ff+dirty'
+    exit 0
+fi
+# END SCRIPT VERSION
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
 
 # Checking Bash version
@@ -33,6 +40,7 @@ Options:
     -v, --verbose           Explain what commands are being run
     -i, --info              Show configuration information
     -d, --debug             Debugging mode
+    --version              Show source date and Git commit ID
     -h, --help              Show this help
 
 EOF

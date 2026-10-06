@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2026-10-06 (Git ecd60a4+uncommitted)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'update_versions' '2026-10-06' 'ecd60a4+uncommitted'
+    exit 0
+fi
+# END SCRIPT VERSION
+# Embed Git source versions so copied scripts can report their provenance.
+set -euo pipefail
+
+if [[ ${1-} == --help ]]; then
+    cat <<'EOF'
+Usage: update_versions [--help | --version]
+
+Update embedded dates and Git commit IDs in this repository's Bash and Python
+scripts, including shell libraries. Run after committing source changes and
+before copying scripts elsewhere. Modified sources get +dirty; new files get
++uncommitted. Version blocks themselves do not count as source changes.
+EOF
+    exit 0
+fi
+if (($#)); then
+    printf 'update_versions: Unexpected argument: %s\n' "$1" >&2
+    exit 1
+fi
+
+repo=$(git -C "$(dirname -- "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)
+cd -- "$repo"
+temporary=$(mktemp -d)
+replacement=
+trap 'rm -rf -- "$temporary"; [[ -z $replacement ]] || rm -f -- "$replacement"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+strip_version() {
+    awk '
+        /^# BEGIN SCRIPT VERSION$/ { skipping = 1; next }
+        /^# END SCRIPT VERSION$/ { skipping = 0; next }
+        !skipping { print }
+    ' "$1"
+}
+
+git ls-files --cached --others --exclude-standard -z > "$temporary/files"
+while IFS= read -r -d '' file; do
+    [[ -f $file && ! -L $file ]] || continue
+    IFS= read -r first_line < "$file" || true
+    case "$first_line" in
+        '#!/usr/bin/env bash'|'#!/bin/bash') language=bash ;;
+        '#!/usr/bin/env python3'|'#!/usr/bin/python3') language=python ;;
+        *)
+            case "$file" in
+                *.py) language=python ;;
+                lib_colors|lib_output) language=bash ;;
+                *) continue ;;
+            esac
+            ;;
+    esac
+
+    strip_version "$file" > "$temporary/source"
+    header_lines=0
+    if [[ $first_line == '#!'* ]]; then
+        header_lines=1
+    fi
+    # Keep the repository's single-line Python module docstrings effective.
+    if [[ $language == python ]]; then
+        next_line=$(sed -n "$((header_lines + 1))p" "$temporary/source")
+        if [[ $next_line == '"""'*'"""' || $next_line == "'''"*"'''" ]]; then
+            header_lines=$((header_lines + 1))
+        fi
+    fi
+    metadata=$(git log -1 --format='%cs %h' HEAD -- "$file")
+    if [[ -z $metadata ]]; then
+        metadata=$(git log -1 --format='%cs %h' HEAD)
+    fi
+    read -r version_date version_commit <<< "$metadata"
+    if git cat-file -e "HEAD:$file" 2>/dev/null; then
+        git show "HEAD:$file" > "$temporary/committed"
+        strip_version "$temporary/committed" > "$temporary/base"
+        if ! cmp -s "$temporary/source" "$temporary/base"; then
+            version_commit+=+dirty
+        fi
+    else
+        version_commit+=+uncommitted
+    fi
+
+    {
+        head -n "$header_lines" "$temporary/source"
+        printf '# BEGIN SCRIPT VERSION\n'
+        printf '# Source version: %s (Git %s)\n' "$version_date" "$version_commit"
+        if [[ $language == bash ]]; then
+            cat <<'EOF'
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+EOF
+            printf '%s\n' "    printf '%s %s (Git %s)\\n' '${file##*/}' '$version_date' '$version_commit'"
+            printf '    exit 0\nfi\n'
+        else
+            cat <<'EOF'
+if __name__ == '__main__':
+    import sys
+    if sys.argv[1:2] == ['--version']:
+EOF
+            printf "        print('%s %s (Git %s)')\n" "${file##*/}" "$version_date" "$version_commit"
+            printf '        sys.exit(0)\n'
+        fi
+        printf '# END SCRIPT VERSION\n'
+        tail -n "+$((header_lines + 1))" "$temporary/source"
+    } > "$temporary/updated"
+    if ! cmp -s "$file" "$temporary/updated"; then
+        # Replace atomically, including when updating this running script.
+        # Preserve existing file permissions, including executable bits.
+        replacement=$(mktemp -- "${file}.version.XXXXXX")
+        cp -p -- "$file" "$replacement"
+        cat "$temporary/updated" > "$replacement"
+        mv -f -- "$replacement" "$file"
+        replacement=
+        printf 'Updated %s: %s (Git %s)\n' "$file" "$version_date" "$version_commit"
+    fi
+done < "$temporary/files"

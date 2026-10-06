@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2025-03-30 (Git 2cbdc7a)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'archivePictureDir' '2025-03-30' '2cbdc7a'
+    exit 0
+fi
+# END SCRIPT VERSION
 
 archivebase="/home/$USER/Pictures/0.ARCHIV"
 

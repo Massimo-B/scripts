@@ -1,3 +1,10 @@
+# BEGIN SCRIPT VERSION
+# Source version: 2026-09-22 (Git f2855ff)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'lib_colors' '2026-09-22' 'f2855ff'
+    exit 0
+fi
+# END SCRIPT VERSION
 # vim: set shiftwidth=4 softtabstop=4 expandtab foldlevel=0 foldmethod=indent: # vim-modline, don't delete
 
 # Avoid multiple sourcing #START ############################################

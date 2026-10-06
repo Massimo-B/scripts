@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
 """Upload UCI configuration, retaining redacted secrets, then reload services."""
+# BEGIN SCRIPT VERSION
+# Source version: 2026-10-06 (Git ecd60a4+dirty)
+if __name__ == '__main__':
+    import sys
+    if sys.argv[1:2] == ['--version']:
+        print('openwrt_pushconfig 2026-10-06 (Git ecd60a4+dirty)')
+        sys.exit(0)
+# END SCRIPT VERSION
 import argparse
 import io
 import os
@@ -169,6 +177,7 @@ def ssh(host, command, **kwargs):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, epilog=(
+        'Use --version to print the embedded source date and Git commit ID. '
         'Reads REPOSITORY/NAME/etc/config (NAME defaults to openwrt). '
         '[REDACTED] retains the corresponding value on the router. '
         'Do not reorder anonymous sections or redacted list entries. '

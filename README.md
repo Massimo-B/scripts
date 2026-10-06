@@ -49,6 +49,35 @@ export PATH="$PWD:${BASH_PREFIX}usr/local/lib:$PATH"
 
 Keep the trailing slash in `BASH_PREFIX`; the scripts append `usr/local/lib` directly.
 
+## Source versions
+
+All scripts embed a source date and Git commit ID and print them with
+`--version`, before checking dependencies or performing any work:
+
+```bash
+./openwrt_pushconfig --version
+./ddcbrightness --version
+bash lib_output --version
+python3 tests/test_openwrt_config.py --version
+```
+
+This also works for standalone copies outside Git. Libraries only handle this
+option when executed directly, so sourcing them preserves the caller's arguments.
+The existing `-v` options still mean verbose.
+
+Run `./update_versions` after committing source changes and before distributing
+scripts. This Bash helper updates the marked version blocks in scripts and tests
+using each file's latest commit date (`YYYY-MM-DD`) and abbreviated commit ID.
+`+dirty` marks source edits relative to HEAD; new files use HEAD's date and ID
+with `+uncommitted`. Changes inside the version block alone do not count as dirty.
+Repeated runs without source changes produce identical files.
+
+The ID identifies the committed source used when stamping, not the later commit
+that stores the stamp itself: embedding a commit's own ID would change that ID.
+The helper requires Git, Bash, and standard Unix utilities; normal version output
+only requires the script's interpreter. Version stamps can be committed alongside
+other changes, but must be refreshed to describe later source revisions.
+
 ## Scripts
 
 ### archivePictureDir

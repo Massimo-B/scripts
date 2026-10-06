@@ -1,4 +1,11 @@
 #!/usr/bin/env bash
+# BEGIN SCRIPT VERSION
+# Source version: 2026-09-22 (Git 4968abb+dirty)
+if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
+    printf '%s %s (Git %s)\n' 'openwrt_pullconfig' '2026-09-22' '4968abb+dirty'
+    exit 0
+fi
+# END SCRIPT VERSION
 # Copy OpenWrt's UCI configuration into a local Git working tree.
 set -euo pipefail
 umask 077
@@ -21,6 +28,7 @@ The redacted copy is for review, not a complete restorable backup.
 
 Options:
   --name NAME  Destination directory name inside the repository
+  --version              Show source date and Git commit ID
   -h, --help   Show this help
 EOF
 }
