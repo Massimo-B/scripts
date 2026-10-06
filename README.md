@@ -111,7 +111,7 @@ Git history. The local copy is restricted to the current user.
 ### openwrt_pushconfig
 
 [Source](openwrt_pushconfig) · Dependencies: Python 3, OpenSSH `ssh`, and Git locally;
-root SSH access, UCI, `tar`, standard BusyBox utilities, and `/sbin/reload_config`
+root SSH access, UCI, `ubus`, `tar`, and standard BusyBox utilities
 on the router. Python is not required on the router.
 
 ```bash
@@ -139,11 +139,15 @@ and sections removed from uploaded files are removed. A private backup of
 `/etc/config` is created under `/root/openwrt-config-backup.XXXXXX/config` before
 installation. An installation failure attempts to restore the affected files.
 
-After installation, the script schedules
-[`reload_config`](https://openwrt.org/docs/guide-user/base-system/uci) to apply
-changes after a short delay. Network or Wi-Fi changes may disconnect clients or
+After installation, the script verifies the installed files and schedules a
+`config.change` service event through `ubus` for each uploaded package after a
+short delay. These are the same notifications used by
+[`reload_config`](https://github.com/openwrt/openwrt/blob/main/package/system/procd/files/reload_config),
+but do not depend on its checksum cache and also cover newly added packages.
+Services must handle these events to reload automatically.
+Network or Wi-Fi changes may disconnect clients or
 change the router's address. The printed backup directory contains `apply.log`
-with the reload command's exit status; successful upload does not verify service
+with the notification results; successful upload does not verify service
 health or connectivity, and there is no automatic rollback after a reload.
 
 ### compress_pictures

@@ -1,4 +1,5 @@
 import io
+import json
 import os
 from pathlib import Path
 import runpy
@@ -69,12 +70,18 @@ class RemoteInstallTests(unittest.TestCase):
         (self.config / 'unrelated').write_bytes(b'keep this')
         self.env = dict(os.environ, PATH=str(self.root / 'bin') + ':' + os.environ['PATH'])
         self.executable('uci', '#!/bin/sh\nif [ "$1" = changes ]; then printf "%s" "${PENDING:-}"; exit 0; fi\nexit "${INVALID:-0}"\n')
-        self.executable('nohup', '#!/bin/sh\necho scheduled\n')
-        reload = self.executable('reload_config', '#!/bin/sh\nexit 0\n')
+        # Execute the actual background worker and wait for it below; only skip
+        # its delay, not its service notifications.
+        self.executable('nohup', '#!/bin/sh\nexec "$@"\n')
+        self.executable('sleep', '#!/bin/sh\nexit 0\n')
+        self.env['EVENT_LOG'] = str(self.root / 'events')
+        self.executable('ubus', '''#!/bin/sh
+printf '%s\\n' "$*" >> "$EVENT_LOG"
+exit "${UBUS_FAILURE:-0}"
+''')
         self.script = PUSH['REMOTE_INSTALL'].replace('/tmp/', str(self.root / 'tmp') + '/')
         self.script = self.script.replace('/etc/config', str(self.config))
         self.script = self.script.replace('/root/', str(self.root / 'root') + '/')
-        self.script = self.script.replace('/sbin/reload_config', str(reload))
 
     def executable(self, name, content):
         path = self.root / 'bin' / name
@@ -91,7 +98,8 @@ class RemoteInstallTests(unittest.TestCase):
                 member.mode = 0o600
                 member.size = len(data)
                 archive.addfile(member, io.BytesIO(data))
-        return subprocess.run(['sh', '-c', self.script], input=payload.getvalue(),
+        # The production worker is detached; wait for it in this test shell.
+        return subprocess.run(['sh', '-c', self.script + '\nwait\n'], input=payload.getvalue(),
                               env=self.env, capture_output=True)
 
     def test_install_backup_and_keep_unrelated_files(self):
@@ -104,6 +112,25 @@ class RemoteInstallTests(unittest.TestCase):
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), b'old config')
         self.assertIn(b'Service reload scheduled', result.stdout)
+        events = (self.root / 'events').read_text().splitlines()
+        packages = []
+        for event in events:
+            self.assertTrue(event.startswith('call service event '))
+            data = json.loads(event.removeprefix('call service event '))
+            self.assertEqual(data['type'], 'config.change')
+            packages.append(data['data']['package'])
+        # Existing and newly added packages both reload without a checksum cache.
+        self.assertEqual(sorted(packages), ['system', 'wireless'])
+
+    def test_reload_failure_is_logged_for_each_package(self):
+        self.env['UBUS_FAILURE'] = '1'
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        log, = (self.root / 'root').glob('*/apply.log')
+        text = log.read_text()
+        self.assertIn('Reload request failed: system', text)
+        self.assertIn('Reload request failed: wireless', text)
+        self.assertIn('Service reload requests exit status: 1', text)
 
     def test_validation_pending_changes_and_concurrent_edits(self):
         for env, old in [({'INVALID': '1'}, b'old config'),
@@ -118,6 +145,7 @@ class RemoteInstallTests(unittest.TestCase):
                 self.assertEqual((self.config / 'wireless').read_bytes(), b'old config')
                 self.assertFalse((self.config / 'system').exists())
                 self.assertFalse(list((self.root / 'root').iterdir()))
+                self.assertFalse((self.root / 'events').exists())
 
     def test_partial_install_rolls_back(self):
         self.executable('mv', '#!/bin/sh\ncase "$3" in */wireless) exit 1;; esac\nexec /bin/mv "$@"\n')
@@ -126,6 +154,16 @@ class RemoteInstallTests(unittest.TestCase):
         self.assertEqual((self.config / 'wireless').read_bytes(), b'old config')
         self.assertFalse((self.config / 'system').exists())
         self.assertNotIn(b'Service reload scheduled', result.stdout)
+        self.assertFalse((self.root / 'events').exists())
+
+    def test_silent_copy_failure_is_detected_and_rolled_back(self):
+        self.executable('mv', '#!/bin/sh\ncase "$3" in */wireless) exit 0;; esac\nexec /bin/mv "$@"\n')
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Installed configuration differs from upload', result.stderr)
+        self.assertEqual((self.config / 'wireless').read_bytes(), b'old config')
+        self.assertFalse((self.config / 'system').exists())
+        self.assertFalse((self.root / 'events').exists())
 
 
 class CommandTests(unittest.TestCase):

@@ -16,10 +16,9 @@ REMOTE_INSTALL = r'''
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci tar cmp mktemp cp mv nohup; do
+for tool in uci tar cmp mktemp cp mv nohup ubus; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool"
 done
-test -x /sbin/reload_config || fail 'Missing /sbin/reload_config'
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
 work=
 backup=
@@ -65,14 +64,33 @@ done
 backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"
 installing=1
+set --
 for file in "$work"/new/*; do
     cp "$file" /etc/config/.openwrt_pushconfig.$$
     chmod 600 /etc/config/.openwrt_pushconfig.$$
     mv -f /etc/config/.openwrt_pushconfig.$$ "/etc/config/${file##*/}"
+    cmp -s "$file" "/etc/config/${file##*/}" || fail 'Installed configuration differs from upload'
+    set -- "$@" "${file##*/}"
 done
 installing=0
 # Let SSH return before network changes can disconnect this session.
-nohup sh -c 'sleep 2; /sbin/reload_config; result=$?; echo "reload_config exit status: $result"; exit "$result"' \
+# Send the same events as reload_config, but do not depend on its checksum
+# cache: it misses new packages and sends no events when the cache is absent.
+# Pass package names as arguments because cleanup removes the staging directory.
+nohup sh -c '
+    sleep 2
+    result=0
+    for name do
+        if ubus call service event "{\"type\":\"config.change\",\"data\":{\"package\":\"$name\"}}"; then
+            echo "Reload requested: $name"
+        else
+            echo "Reload request failed: $name" >&2
+            result=1
+        fi
+    done
+    echo "Service reload requests exit status: $result"
+    exit "$result"
+' sh "$@" \
     >"$backup/apply.log" 2>&1 </dev/null &
 echo "Configuration installed. Backup: $backup/config"
 echo "Service reload scheduled; router log: $backup/apply.log"
@@ -155,7 +173,7 @@ def main():
         '[REDACTED] retains the corresponding value on the router. '
         'Do not reorder anonymous sections or redacted list entries. '
         'Files absent locally are retained on the router. '
-        'Creates a backup under /root and schedules reload_config; network changes may disconnect you.'
+        'Creates a backup under /root and schedules service reload events; network changes may disconnect you.'
     ))
     parser.add_argument('--name', default='openwrt')
     parser.add_argument('ssh_host', metavar='SSH_HOST')
