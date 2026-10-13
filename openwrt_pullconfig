@@ -14,7 +14,7 @@ usage() {
     cat <<'EOF'
 Usage: openwrt_pullconfig [--name NAME] SSH_HOST REPOSITORY
 
-Copy /etc/config from OpenWrt over SSH into REPOSITORY/NAME/etc/config.
+Copy /etc/config and, when present, /etc/apk into REPOSITORY/NAME/etc.
 NAME defaults to openwrt. Use distinct names when fetching from multiple routers.
 SSH_HOST can be root@192.168.1.1 or an alias from ~/.ssh/config (including its
 configured user, port, and identity file).
@@ -57,7 +57,7 @@ repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git w
 repo=$(realpath -- "$repo")
 destination="$repo/$name/etc/config"
 # Refuse symlinked parents so the mirror cannot write outside the repository.
-for path in "$repo/$name" "$repo/$name/etc" "$destination"; do
+for path in "$repo/$name" "$repo/$name/etc" "$destination" "$repo/$name/etc/apk"; do
     [[ ! -L "$path" ]] || die "Destination must not be a symbolic link: $path"
     [[ ! -e "$path" || -d "$path" ]] || die "Destination is not a directory: $path"
 done
@@ -69,12 +69,14 @@ trap 'exit 143' TERM
 printf 'Fetching /etc/config from %s...\n' "$host"
 # Download fully before touching the destination; -T prevents terminal output
 # from corrupting the archive. No scp/SFTP or rsync is needed on the router.
-ssh -T -- "$host" 'tar -czf - -C / etc/config' > "$temporary/config.tar.gz"
+ssh -T -- "$host" 'set -e; set -- etc/config; if [ -d /etc/apk ]; then set -- "$@" etc/apk; fi; tar -czf - -C / "$@"' > "$temporary/config.tar.gz"
 
 # Only accept regular UCI files and their parent directory before extraction.
 tar -tzf "$temporary/config.tar.gz" > "$temporary/members"
 while IFS= read -r member; do
-    [[ "$member" == etc/config || "$member" == etc/config/ ||
+    [[ "$member" == etc/apk || "$member" == etc/apk/ ||
+       "$member" =~ ^etc/apk/([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*)?/?$ ||
+       "$member" == etc/config || "$member" == etc/config/ ||
        "$member" =~ ^etc/config/[a-zA-Z0-9_]+$ ]] || die "Unexpected archive path: $member"
 done < "$temporary/members"
 tar -tvzf "$temporary/config.tar.gz" > "$temporary/types"
@@ -89,9 +91,20 @@ shopt -s nullglob dotglob
 for file in "$source_config"/*; do
     [[ -f "$file" && ! -L "$file" ]] || die 'Expected regular UCI package files'
 done
+source_apk="$temporary/extracted/etc/apk"
+if [[ -d "$source_apk" ]]; then
+    [[ -f "$source_apk/world" ]] || die 'APK configuration is missing world'
+fi
 mkdir -p -- "$destination"
 # Preserve executable bits, but restrict access to the local owner.
 # Protect any local Git metadata even if a nested repository exists here.
 rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_config/" "$destination/"
+if [[ -d "$source_apk" ]]; then
+    mkdir -p -- "$repo/$name/etc/apk"
+    rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_apk/" "$repo/$name/etc/apk/"
+elif [[ -d "$repo/$name/etc/apk" ]]; then
+    mkdir "$temporary/empty"
+    rsync -r --delete --exclude=.git -- "$temporary/empty/" "$repo/$name/etc/apk/"
+fi
 printf 'Copied configuration to %s\n' "$destination"
-git -C "$repo" status --short -- "$name/etc/config"
+git -C "$repo" status --short -- "$name/etc/config" "$name/etc/apk"

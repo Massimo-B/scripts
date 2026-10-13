@@ -109,8 +109,12 @@ The script is Bash; Python is not required.
 
 Copies `/etc/config`, containing the main network, Wi-Fi, firewall, DHCP, and
 system settings, into an existing local Git working tree. This is a configuration
-snapshot, not a complete system backup; files outside `/etc/config`, such as SSH
-keys, custom scripts, and installed package lists, are not included.
+snapshot, not a complete system backup. When present, `/etc/apk` is also mirrored
+into `NAME/etc/apk`, including `world`, repository definitions, signing keys, and
+other APK settings. `world` records explicitly requested packages and constraints;
+APK resolves their dependencies during restore. SSH keys, custom scripts outside
+these directories, and package binaries are not included. Packages installed from
+local APK files must also be made available separately for restoration.
 
 ```bash
 ./openwrt_pullconfig root@192.168.1.1 /path/to/router-config-repo
@@ -128,20 +132,21 @@ finish before the destination is updated. The script displays Git status but
 does not stage, commit, or push. Review and commit the snapshot yourself:
 
 ```bash
-git -C /path/to/router-config-repo diff -- openwrt/etc/config
-git -C /path/to/router-config-repo add -- openwrt/etc/config
+git -C /path/to/router-config-repo diff -- openwrt/etc
+git -C /path/to/router-config-repo add -- openwrt/etc
 git -C /path/to/router-config-repo commit -m "Update OpenWrt configuration"
 ```
 
 All file contents are copied unchanged, including passwords, keys, and comments.
 The local copy is restricted to the current user. Only regular UCI package files
-with alphanumeric/underscore filenames are accepted; links and nested directories
-are rejected.
+with alphanumeric/underscore filenames are accepted in `/etc/config`. APK files
+may use nested directories and dots, plus signs, and hyphens in filenames. Links
+and special files are rejected in both snapshots.
 
 ### openwrt_pushconfig
 
 [Source](openwrt_pushconfig) · Dependencies: Bash, OpenSSH `ssh`, Git, GNU `tar`,
-`mktemp`, GNU `realpath`, and `grep` locally; root SSH access, UCI, `ubus`, `tar`,
+`mktemp`, GNU `realpath`, `find`, and `grep` locally; root SSH access, UCI, `ubus`, `tar`,
 and standard shell utilities on the router. Neither Python nor `nohup` is needed.
 
 ```bash
@@ -149,9 +154,25 @@ and standard shell utilities on the router. Neither Python nor `nohup` is needed
 ./openwrt_pushconfig --name corewrt root@10.10.20.1 /path/to/router-config-repo
 ```
 
-Reads the same `NAME/etc/config` directory as `openwrt_pullconfig`. Edit the local
+Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
+`openwrt_pullconfig`. Edit the local
 files, then push to install and apply them. Files are copied byte for byte,
 including secrets; no values are redacted, merged, or rewritten.
+
+When an APK snapshot is present, the router must have `apk`. Before applying UCI
+files, push backs up `/etc/apk` alongside the UCI backup, restores the saved APK
+settings, runs `apk update`, and passes the saved `world` requirements to
+`apk add --`. The existing router's world requirements are retained, so packages
+absent from the snapshot are not deliberately removed. A configuration-only
+snapshot still works on routers without APK. Repository URLs must match the
+router's firmware, architecture, and kernel; requested packages must remain
+available from those repositories. APK may adjust dependencies to satisfy the
+saved constraints. See the [APK add documentation](https://github.com/alpinelinux/apk-tools/blob/master/doc/apk-add.8.scd).
+
+If repository updates or installation fail, push reports failure, restores the
+previous APK settings, and does not apply the uploaded UCI files or schedule
+reloads. Package changes already performed by APK, including effects of package
+scripts, cannot be automatically rolled back. The backup remains on the router.
 
 Snapshots created by the previous scripts may still contain `[REDACTED]`.
 Push rejects these files. Restore the actual values before pushing, or save your

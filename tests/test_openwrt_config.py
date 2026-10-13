@@ -59,13 +59,16 @@ exit "${UBUS_FAILURE:-0}"
 root = pathlib.Path(os.environ['ROUTER'])
 if os.environ.get('SSH_FAILURE'):
     sys.exit(1)
-if sys.argv[-1].startswith('tar '):
-    sys.exit(subprocess.run(['tar', '-czf', '-', '-C', str(root), 'etc/config']).returncode)
+if 'tar -czf - -C /' in sys.argv[-1]:
+    paths = ['etc/config']
+    if (root / 'etc/apk').is_dir():
+        paths.append('etc/apk')
+    sys.exit(subprocess.run(['tar', '-czf', '-', '-C', str(root), *paths]).returncode)
 script = sys.argv[-1]
-script = re.sub(r'/etc/config|/tmp/|/root/', lambda match: str(root) + match[0], script)
+script = re.sub(r'(?<![a-zA-Z0-9])/etc/config|(?<![a-zA-Z0-9])/etc/apk|/tmp/|/root/', lambda match: str(root) + match[0], script)
 # Wait only in tests, so events and apply.log can be asserted deterministically.
 if not os.environ.get('DETACHED'):
-    script += '\\nwait\\n'
+    script += '\\nstatus=$?\\nwait\\nexit $status\\n'
 env = dict(os.environ, PATH=os.environ['REMOTE_BIN'])
 sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
 ''')
@@ -131,6 +134,84 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         self.assertNotEqual(self.run_script('openwrt_pullconfig').returncode, 0)
         self.assertEqual((self.local / 'firewall').read_bytes(), FIREWALL)
         self.assertFalse((self.local / 'link').exists())
+
+    def setup_apk(self):
+        apk = self.router / 'etc/apk'
+        (apk / 'repositories.d').mkdir(parents=True)
+        (apk / 'keys').mkdir()
+        (apk / 'world').write_text('extra@custom\nother>=2\n')
+        (apk / 'repositories.d/custom.list').write_text('https://example.org/packages.adb\n')
+        (apk / 'keys/custom.pem').write_text('public key')
+        self.remote_script('apk', '''printf '%s\\n' "$*" >> "$ROUTER/apk-events"
+[ "${APK_FAILURE:-}" != "$1" ] || exit 1
+if [ "$1" = add ]; then
+    shift 2
+    for requirement do printf '%s\\n' "$requirement" >> "$ROUTER/etc/apk/world"; done
+fi
+''')
+        return apk
+
+    def test_apk_snapshot_and_push_install_saved_requirements(self):
+        apk = self.setup_apk()
+        self.pull()
+        local = self.repo / 'corewrt/etc/apk'
+        self.assertEqual((local / 'world').read_bytes(), (apk / 'world').read_bytes())
+        self.assertEqual((local / 'keys/custom.pem').read_text(), 'public key')
+        self.assertEqual((local / 'world').stat().st_mode & 0o777, 0o600)
+        (apk / 'world').write_text('base\n')
+        (apk / 'repositories.d/custom.list').write_text('old')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.router / 'apk-events').read_text(), 'update\nadd -- extra@custom other>=2\n')
+        self.assertEqual((apk / 'world').read_text(), 'base\nextra@custom\nother>=2\n')
+        self.assertEqual((apk / 'repositories.d/custom.list').read_bytes(), (local / 'repositories.d/custom.list').read_bytes())
+
+    def test_failed_apk_install_restores_apk_and_keeps_uci(self):
+        apk = self.setup_apk()
+        self.pull()
+        (apk / 'world').write_text('base\n')
+        (self.local / 'firewall').write_text('changed')
+        for command in ('update', 'add'):
+            with self.subTest(command=command):
+                self.env['APK_FAILURE'] = command
+                result = self.run_script('openwrt_pushconfig')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((apk / 'world').read_text(), 'base\n')
+                self.assertEqual((self.config / 'firewall').read_bytes(), FIREWALL)
+                self.assertFalse((self.root / 'events').exists())
+
+    def test_apk_snapshot_requires_apk_on_target(self):
+        apk = self.setup_apk()
+        self.pull()
+        (self.remote_bin / 'apk').unlink()
+        original = (apk / 'world').read_bytes()
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Router has no apk', result.stderr)
+        self.assertEqual((apk / 'world').read_bytes(), original)
+
+    def test_missing_world_aborts_pull_before_local_changes(self):
+        apk = self.setup_apk()
+        self.pull()
+        (apk / 'world').unlink()
+        (self.config / 'firewall').write_text('changed')
+        self.assertNotEqual(self.run_script('openwrt_pullconfig').returncode, 0)
+        self.assertEqual((self.local / 'firewall').read_bytes(), FIREWALL)
+
+    def test_apk_symlink_rejected_on_pull_and_push(self):
+        apk = self.setup_apk()
+        self.pull()
+        (apk / 'keys/link').symlink_to('/etc/passwd')
+        self.assertNotEqual(self.run_script('openwrt_pullconfig').returncode, 0)
+        (self.repo / 'corewrt/etc/apk/keys/link').symlink_to('/etc/passwd')
+        self.assertNotEqual(self.run_script('openwrt_pushconfig').returncode, 0)
+
+    def test_apk_mirrors_deleted_files(self):
+        apk = self.setup_apk()
+        self.pull()
+        (apk / 'keys/custom.pem').unlink()
+        self.pull()
+        self.assertFalse((self.repo / 'corewrt/etc/apk/keys/custom.pem').exists())
 
     def test_invalid_or_pending_uci_changes_leave_router_unchanged(self):
         self.pull()

@@ -6,7 +6,7 @@ if [[ "${BASH_SOURCE[0]}" == "$0" && "${1-}" == --version ]]; then
     exit 0
 fi
 # END SCRIPT VERSION
-# Copy local UCI files unchanged to OpenWrt, then reload affected services.
+# Restore UCI and APK configuration, install requested packages, then reload services.
 set -euo pipefail
 umask 077
 
@@ -14,7 +14,8 @@ usage() {
     cat <<'EOF'
 Usage: openwrt_pushconfig [--name NAME] SSH_HOST REPOSITORY
 
-Copy REPOSITORY/NAME/etc/config to /etc/config on OpenWrt over SSH.
+Copy REPOSITORY/NAME/etc/config and optional etc/apk to OpenWrt over SSH.
+Restore APK repositories and keys, then install packages requested by world.
 NAME defaults to openwrt. Files, including secrets, are copied unchanged.
 Files absent locally are retained on the router. Old [REDACTED] snapshots
 must be replaced with complete configuration files before pushing.
@@ -50,7 +51,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'Invalid NAME'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar mktemp realpath grep; do
+for command in ssh git tar mktemp realpath grep find; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -71,12 +72,25 @@ for file in "$source_config"/*; do
     files+=("$package")
 done
 ((${#files[@]})) || die 'No configuration files to push'
+source_apk="$repo/$name/etc/apk"
+archive_files=()
+for file in "${files[@]}"; do archive_files+=("etc/config/$file"); done
+if [[ -e "$source_apk" || -L "$source_apk" ]]; then
+    [[ -d "$source_apk" && ! -L "$source_apk" ]] || die 'Expected a real APK directory'
+    while IFS= read -r -d '' file; do
+        relative=${file#"$source_apk"/}
+        [[ "$relative" == .git || "$relative" == .git/* ]] && continue
+        [[ "$relative" =~ ^([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*[a-zA-Z0-9_+-][a-zA-Z0-9._+-]*$ && ! -L "$file" && ( -d "$file" || -f "$file" ) ]] || die "Invalid APK path: $relative"
+        [[ ! -f "$file" ]] || archive_files+=("etc/apk/$relative")
+    done < <(find "$source_apk" -mindepth 1 -print0)
+    [[ -f "$source_apk/world" ]] || die 'APK snapshot is missing world'
+fi
 temporary=$(mktemp -d)
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Finish the archive before SSH so local read failures cannot start installation.
-tar -czf "$temporary/config.tar.gz" -C "$source_config" -- "${files[@]}"
+tar -czf "$temporary/config.tar.gz" -C "$repo/$name" -- "${archive_files[@]}"
 
 # The router only needs its standard /bin/sh, not Bash, Python, or nohup.
 remote_install=$(cat <<'REMOTE'
@@ -90,11 +104,12 @@ mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale 
 work=
 backup=
 installing=0
+apk_installing=0
 cleanup() {
     status=$?
     trap - EXIT
     if [ "$installing" = 1 ]; then
-        for file in "$work"/new/*; do
+        for file in "$work"/new/etc/config/*; do
             name=${file##*/}
             if [ -f "$backup/config/$name" ]; then
                 cp -p "$backup/config/$name" "/etc/config/$name" || status=1
@@ -103,6 +118,11 @@ cleanup() {
             fi
         done
         echo "openwrt_pushconfig: Installation failed; attempted restore from $backup" >&2
+    fi
+    if [ "$apk_installing" = 1 ]; then
+        rm -rf /etc/apk
+        cp -Rp "$backup/apk" /etc/apk || status=1
+        echo "APK configuration restored; package changes may remain. Backup: $backup" >&2
     fi
     rm -f /etc/config/.openwrt_pushconfig.$$
     [ -z "$work" ] || rm -rf "$work"
@@ -117,17 +137,39 @@ mkdir "$work/new" "$work/delta"
 tar -xzf - -C "$work/new"
 changes=$(uci changes 2>/dev/null) || fail 'Cannot inspect pending UCI changes'
 [ -z "$changes" ] || fail 'Commit or revert pending UCI changes first (configuration unchanged)'
-for file in "$work"/new/*; do
+for file in "$work"/new/etc/config/*; do
     name=${file##*/}
     [ ! -L "/etc/config/$name" ] || fail 'Router configuration contains a symbolic link'
     [ ! -e "/etc/config/$name" ] || [ -f "/etc/config/$name" ] || fail 'Router package is not a regular file'
-    uci -c "$work/new" -P "$work/delta" export "$name" >/dev/null 2>&1 || fail "Invalid UCI package: $name (configuration unchanged)"
+    uci -c "$work/new/etc/config" -P "$work/delta" export "$name" >/dev/null 2>&1 || fail "Invalid UCI package: $name (configuration unchanged)"
 done
 backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"
+if [ -d "$work/new/etc/apk" ]; then
+    command -v apk >/dev/null || fail 'Router has no apk (configuration unchanged)'
+    [ -d /etc/apk ] && [ ! -L /etc/apk ] || fail 'Expected a real /etc/apk directory'
+    cp -Rp /etc/apk "$backup/apk"
+    # Preserve existing world requirements; add the saved requirements without
+    # removing packages already requested on this router.
+    set --
+    while IFS= read -r requirement || [ -n "$requirement" ]; do
+        case "$requirement" in ''|'#'*) continue ;; -*|*[!a-zA-Z0-9_./+:@~\<\>=!-]*) fail "Invalid APK world requirement: $requirement" ;; esac
+        set -- "$@" "$requirement"
+    done < "$work/new/etc/apk/world"
+    apk_installing=1
+    cp /etc/apk/world "$work/world.current"
+    rm -rf /etc/apk
+    cp -Rp "$work/new/etc/apk" /etc/apk
+    cp "$work/world.current" /etc/apk/world
+    apk update || fail 'APK repository update failed'
+    if [ "$#" -gt 0 ]; then
+        apk add -- "$@" || fail 'APK package installation failed'
+    fi
+    echo 'APK packages installed from saved world.'
+fi
 installing=1
 set --
-for file in "$work"/new/*; do
+for file in "$work"/new/etc/config/*; do
     name=${file##*/}
     cp "$file" /etc/config/.openwrt_pushconfig.$$
     chmod 600 /etc/config/.openwrt_pushconfig.$$
@@ -136,6 +178,7 @@ for file in "$work"/new/*; do
     set -- "$@" "$name"
 done
 installing=0
+apk_installing=0
 # Ignore SSH hangup using the shell builtin instead of the optional nohup applet.
 # Set this before forking so there is no race with the SSH session closing.
 trap '' HUP
