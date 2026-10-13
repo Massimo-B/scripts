@@ -161,9 +161,13 @@ including secrets; no values are redacted, merged, or rewritten.
 
 When an APK snapshot is present, the router must have `apk`. Before applying UCI
 files, push backs up `/etc/apk` alongside the UCI backup, restores the saved APK
-settings, runs `apk update`, and passes the saved `world` requirements to
-`apk add --`. The existing router's world requirements are retained, so packages
-absent from the snapshot are not deliberately removed. A configuration-only
+settings, runs `apk update`, and runs
+`apk add --` without package arguments against the restored `world`. This installs
+missing requirements and removes packages no longer requested or needed as
+dependencies. Already installed packages satisfying the saved constraints are
+retained; no upgrade or reinstall is requested. Removing a package from `world`
+therefore removes it only if no remaining package depends on it. An unchanged
+package selection causes no package installation or removal. A configuration-only
 snapshot still works on routers without APK. Repository URLs must match the
 router's firmware, architecture, and kernel; requested packages must remain
 available from those repositories. APK may adjust dependencies to satisfy the

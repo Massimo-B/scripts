@@ -145,8 +145,12 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         self.remote_script('apk', '''printf '%s\\n' "$*" >> "$ROUTER/apk-events"
 [ "${APK_FAILURE:-}" != "$1" ] || exit 1
 if [ "$1" = add ]; then
-    shift 2
-    for requirement do printf '%s\\n' "$requirement" >> "$ROUTER/etc/apk/world"; done
+    [ "$#" = 2 ] && [ "$2" = -- ] || exit 2
+    # Model the solver applying world, keeping already satisfied requirements.
+    if ! cmp -s "$ROUTER/etc/apk/world" "$ROUTER/installed-world"; then
+        printf '%s\\n' synchronized >> "$ROUTER/package-changes"
+        cp "$ROUTER/etc/apk/world" "$ROUTER/installed-world"
+    fi
 fi
 ''')
         return apk
@@ -162,9 +166,33 @@ fi
         (apk / 'repositories.d/custom.list').write_text('old')
         result = self.run_script('openwrt_pushconfig')
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.router / 'apk-events').read_text(), 'update\nadd -- extra@custom other>=2\n')
-        self.assertEqual((apk / 'world').read_text(), 'base\nextra@custom\nother>=2\n')
+        self.assertEqual((self.router / 'apk-events').read_text(), 'update\nadd --\n')
+        self.assertEqual((apk / 'world').read_text(), 'extra@custom\nother>=2\n')
         self.assertEqual((apk / 'repositories.d/custom.list').read_bytes(), (local / 'repositories.d/custom.list').read_bytes())
+
+    def test_repeated_push_keeps_packages_and_deleted_requirement_is_removed(self):
+        self.setup_apk()
+        self.pull()
+        installed = self.router / 'installed-world'
+        installed.write_text('obsolete\nextra@custom\n')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(installed.read_text(), 'extra@custom\nother>=2\n')
+        changes = self.router / 'package-changes'
+        self.assertEqual(changes.read_text(), 'synchronized\n')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(changes.read_text(), 'synchronized\n')
+        (self.repo / 'corewrt/etc/apk/world').write_text('extra@custom\n')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(installed.read_text(), 'extra@custom\n')
+        self.assertEqual(changes.read_text(), 'synchronized\nsynchronized\n')
+        # An empty world must still invoke the solver to remove remaining packages.
+        (self.repo / 'corewrt/etc/apk/world').write_text('')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(installed.read_text(), '')
 
     def test_failed_apk_install_restores_apk_and_keeps_uci(self):
         apk = self.setup_apk()

@@ -15,7 +15,8 @@ usage() {
 Usage: openwrt_pushconfig [--name NAME] SSH_HOST REPOSITORY
 
 Copy REPOSITORY/NAME/etc/config and optional etc/apk to OpenWrt over SSH.
-Restore APK repositories and keys, then install packages requested by world.
+Restore APK repositories and keys, then synchronize packages with saved world.
+Packages no longer required by world or its dependencies are removed.
 NAME defaults to openwrt. Files, including secrets, are copied unchanged.
 Files absent locally are retained on the router. Old [REDACTED] snapshots
 must be replaced with complete configuration files before pushing.
@@ -149,23 +150,15 @@ if [ -d "$work/new/etc/apk" ]; then
     command -v apk >/dev/null || fail 'Router has no apk (configuration unchanged)'
     [ -d /etc/apk ] && [ ! -L /etc/apk ] || fail 'Expected a real /etc/apk directory'
     cp -Rp /etc/apk "$backup/apk"
-    # Preserve existing world requirements; add the saved requirements without
-    # removing packages already requested on this router.
-    set --
-    while IFS= read -r requirement || [ -n "$requirement" ]; do
-        case "$requirement" in ''|'#'*) continue ;; -*|*[!a-zA-Z0-9_./+:@~\<\>=!-]*) fail "Invalid APK world requirement: $requirement" ;; esac
-        set -- "$@" "$requirement"
-    done < "$work/new/etc/apk/world"
     apk_installing=1
-    cp /etc/apk/world "$work/world.current"
     rm -rf /etc/apk
     cp -Rp "$work/new/etc/apk" /etc/apk
-    cp "$work/world.current" /etc/apk/world
     apk update || fail 'APK repository update failed'
-    if [ "$#" -gt 0 ]; then
-        apk add -- "$@" || fail 'APK package installation failed'
-    fi
-    echo 'APK packages installed from saved world.'
+    # With no arguments, add commits the restored world without marking any
+    # package for upgrade or reinstall. The solver installs missing requirements
+    # and removes packages no longer needed, retaining required dependencies.
+    apk add -- || fail 'APK package synchronization failed'
+    echo 'APK packages synchronized with saved world.'
 fi
 installing=1
 set --
