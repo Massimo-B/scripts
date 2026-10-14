@@ -10,7 +10,8 @@ target Linux and use GNU command-line utilities; use Bash 4 or newer.
 | --- | --- |
 | [archivePictureDir](#archivepicturedir) | Move picture directories into a personal archive. |
 | [openwrt_pullconfig](#openwrt_pullconfig) | Copy essential OpenWrt configuration over SSH into Git. |
-| [openwrt_pushconfig](#openwrt_pushconfig) | Upload unchanged configuration files and apply them. |
+| [openwrt_pushconfig](#openwrt_pushconfig) | Restore configuration and packages while preserving secrets. |
+| [openwrt_secrets](#openwrt_secrets) | Check UCI secrets and install a pre-commit check. |
 | [compress_pictures](#compress_pictures) | Resize and recompress JPEG images with ImageMagick. |
 | [dar_wrapper](#dar_wrapper) | Create full and subsequent backups with DAR. |
 | [ddcbrightness](#ddcbrightness) | Adjust external monitor backlight brightness over DDC/CI. |
@@ -104,8 +105,10 @@ containing spaces are not supported reliably.
 ### openwrt_pullconfig
 
 [Source](openwrt_pullconfig) · Dependencies: OpenSSH `ssh`, Git, GNU `tar`, `rsync`,
-`mktemp`, and GNU `realpath` locally; SSH access and `tar` on the router.
-The script is Bash; Python is not required.
+`mktemp`, `grep`, and GNU `realpath` locally; SSH access, UCI, `awk`, and `tar`
+on the router. Install the companion `openwrt_secrets` beside both scripts
+(with the same optional executable prefix, e.g. `mo-openwrt_secrets`).
+The script is Bash; Python is not required. UCI is needed only on the router.
 
 Copies `/etc/config`, containing the main network, Wi-Fi, firewall, DHCP, and
 system settings, into an existing local Git working tree. This is a configuration
@@ -147,12 +150,19 @@ finish before the destination is updated. The script displays Git status but
 does not stage, commit, or push. Review and commit the snapshot yourself:
 
 ```bash
-git -C /path/to/router-config-repo diff -- openwrt/etc
-git -C /path/to/router-config-repo add -- openwrt/etc
+git -C /path/to/router-config-repo diff -- openwrt/etc openwrt/secret-paths openwrt/.gitignore
+git -C /path/to/router-config-repo add -- openwrt/etc openwrt/secret-paths openwrt/.gitignore
 git -C /path/to/router-config-repo commit -m "Update OpenWrt configuration"
 ```
 
-All file contents are copied unchanged, including passwords, keys, and comments.
+Known UCI secrets are removed in a temporary directory on the router, before
+any configuration is transferred. The running configuration is not changed.
+`NAME/secret-paths` records the removed option paths and section types without
+values; commit it together with `NAME/.gitignore` and the public configuration.
+Pull adds `/secrets/` to `NAME/.gitignore` and refuses already tracked secret
+files. Existing local overrides under `NAME/secrets/` are never overwritten.
+Packages containing secrets are exported through UCI and lose their original
+formatting/comments. Other configuration files retain their original bytes.
 The local copy is restricted to the current user. Only regular UCI package files
 with alphanumeric/underscore filenames are accepted in `/etc/config`. APK files
 may use nested directories and dots, plus signs, and hyphens in filenames. Links
@@ -161,7 +171,8 @@ and special files are rejected in both snapshots.
 ### openwrt_pushconfig
 
 [Source](openwrt_pushconfig) · Dependencies: Bash, OpenSSH `ssh`, Git, GNU `tar`,
-`mktemp`, GNU `realpath`, `find`, and `grep` locally; root SSH access, UCI, `ubus`, `tar`,
+`mktemp`, GNU `realpath`, `find`, `chmod`, and `grep` locally; root SSH access,
+UCI, `awk`, `ubus`, `tar`,
 and standard shell utilities on the router. Neither Python nor `nohup` is needed.
 
 ```bash
@@ -172,8 +183,47 @@ and standard shell utilities on the router. Neither Python nor `nohup` is needed
 Checks the router hostname against `NAME` before installing anything; `--force`
 skips this check, as described above. Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
 `openwrt_pullconfig`. Edit the local
-files, then push to install and apply them. Files are copied byte for byte,
-including secrets; no values are redacted, merged, or rewritten.
+files, then push to install and apply them. Known secret options in public files
+are rejected. Missing secret options are copied from the existing matching
+router sections. Explicit overrides from ignored `NAME/secrets/PACKAGE` UCI
+files take precedence. Overrides may contain only protected options, in sections
+already defined in the public files with the same name and type. Lists are
+replaced, not appended; quoting and multiline values are retained. Empty secret
+overrides are rejected because UCI interprets empty string options as removal.
+Sections containing secrets must be named. Anonymous secret-bearing sections
+are refused, so a section reorder cannot attach passwords to another section.
+
+Example public file `corewrt/etc/config/wireless`:
+
+```uci
+config wifi-iface 'guest'
+    option device 'radio0'
+    option network 'guest'
+    option ssid 'Guest'
+    option encryption 'psk2'
+```
+
+The private override `corewrt/secrets/wireless` supplies a new password:
+
+```uci
+config wifi-iface 'guest'
+    option key 'your-new-password'
+```
+
+Create `corewrt/secrets` with mode 700 and its files with mode 600. Push also
+restricts their permissions, checks that Git ignores the directory, and refuses
+tracked secret files. If you create a snapshot locally without pulling first,
+add `/secrets/` to `corewrt/.gitignore` yourself. Inline passwords in newly created
+public files must be moved into these overrides before pushing or committing.
+
+Before any live changes, push checks that all options recorded in `secret-paths`
+exist in the merged configuration for retained sections. A missing value on a
+new router must be supplied through an override. Removed sections/packages do
+not require their old secrets. New secured Wi-Fi (PSK/SAE/WEP) and WireGuard
+interfaces are also checked for their required key. For other new services,
+add required paths and section types to `secret-paths` explicitly, e.g.
+`network.wan.password interface`. UCI parsing alone does not validate a service's
+complete credential requirements. `--force` never skips secret validation.
 
 When an APK snapshot is present, the router must have `apk`. Before applying UCI
 files, push backs up `/etc/apk` alongside the UCI backup, restores the saved APK
@@ -195,8 +245,8 @@ reloads. Package changes already performed by APK, including effects of package
 scripts, cannot be automatically rolled back. The backup remains on the router.
 
 Snapshots created by the previous scripts may still contain `[REDACTED]`.
-Push rejects these files. Restore the actual values before pushing, or save your
-local edits separately, pull a fresh complete snapshot, and reapply your edits.
+Push rejects these files. Save local edits separately, pull a fresh sanitized
+snapshot, and put any new passwords in private overrides before pushing.
 Pull overwrites local edits.
 
 The router validates every uploaded package with UCI and refuses pending UCI
@@ -216,6 +266,45 @@ handle these events to reload automatically. Network or Wi-Fi changes may
 disconnect clients or change the router's address. The printed backup directory
 contains `apply.log` with notification results; successful upload does not verify
 service health or connectivity, and there is no automatic rollback after a reload.
+
+### openwrt_secrets
+
+[Source](openwrt_secrets) · Dependencies: Bash, Git, `awk`, and standard Unix tools.
+No local UCI is needed. Pull and push use this companion to send UCI filtering
+and merge functions to the router.
+
+The explicit default protected option names are:
+`password`, `passwd`, `key`, `key1`, `key2`, `key3`, `key4`, `secret`, `token`, `psk`, `private_key`,
+`preshared_key`, `client_secret`, `auth_secret`, `radius_secret`, `acct_secret`,
+`auth_key`, `acct_key`, `sae_password`, `wpa_psk`, `shared_secret`, `api_key`,
+`access_token`, `refresh_token`, `tls_auth`, and `tls_crypt`.
+Add extra exact option names (one per line, comments allowed) to
+`NAME/secret-options` and commit that file. These names apply across UCI packages;
+unknown option names are not automatically classified. This covers UCI options,
+not secrets in APK repository URLs, unrelated files, or arbitrary comments.
+
+Check the working tree or install the commit guard in your configuration repo:
+
+```bash
+./openwrt_secrets --check /path/to/router-config-repo
+./openwrt_secrets --install-hook /path/to/router-config-repo
+```
+
+The installed hook checks all public configuration files in the Git index,
+including multiline and quoted options, and blocks tracked/staged files under
+`NAME/secrets/`, even if added with `git add -f`. It reports paths, never values.
+The staged policy and working policy are both used. Hook installation refuses
+to overwrite an existing `pre-commit` hook; call
+`openwrt_secrets --check-staged .` from that hook instead. Install the hook once
+per clone; to update an installed check, copy the new helper over
+`$(git rev-parse --git-path hooks)/openwrt-secrets-check`. Hooks are not transferred
+by Git. Git hooks can be bypassed deliberately, so they are an accident guard.
+Secrets already committed remain in the repository history; remove/rotate them
+separately if needed.
+
+Run `UCI_TEST_BINARY=/path/to/uci python3 tests/test_openwrt_config.py` to test
+filtering and merging with a real UCI CLI in the simulated router. Without it,
+the UCI integration cases are skipped; the Git guard and transfer tests still run.
 
 ### compress_pictures
 

@@ -18,7 +18,8 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-FIREWALL = b"config defaults\n option input 'REJECT'\n option password 'two\nsecret lines'\n"
+FIREWALL = b"config defaults\n option input 'REJECT'\n"
+UCI_BINARY = os.environ.get('UCI_TEST_BINARY') or shutil.which('uci')
 
 
 class ConfigCommandTests(unittest.TestCase):
@@ -45,7 +46,7 @@ class ConfigCommandTests(unittest.TestCase):
         self.remote_bin.mkdir()
         # Model a minimal router: no Python, Bash, rsync, or nohup in PATH.
         for command in ('tar', 'gzip', 'cmp', 'mktemp', 'cp', 'mv', 'sleep',
-                        'mkdir', 'chmod', 'rm', 'rmdir'):
+                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat'):
             (self.remote_bin / command).symlink_to(shutil.which(command))
         self.remote_script('uci', '''if [ "$1" = changes ]; then
     printf '%s' "${PENDING:-}"
@@ -53,6 +54,21 @@ class ConfigCommandTests(unittest.TestCase):
 fi
 exit "${INVALID:-0}"
 ''')
+        if UCI_BINARY:
+            wrapper = self.remote_bin / 'uci'
+            wrapper.write_text(f'#!{sys.executable}\n' + '''import os, subprocess, sys
+args = sys.argv[1:]
+if args == ['changes'] and os.environ.get('PENDING'):
+    print('pending')
+    sys.exit(0)
+if os.environ.get('INVALID') and 'export' in args:
+    sys.exit(1)
+root = os.environ['ROUTER']
+command = [os.environ['UCI_TEST_BINARY'], '-c', root + '/etc/config', '-t', root + '/delta', *args]
+os.makedirs(root + '/delta', exist_ok=True)
+sys.exit(subprocess.run(command).returncode)
+''')
+            wrapper.chmod(0o700)
         self.remote_script('sleep', 'exit 0\n')
         self.remote_script('ubus', '''printf '%s\\n' "$4" >> "$EVENT_LOG"
 exit "${UBUS_FAILURE:-0}"
@@ -75,6 +91,8 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'],
                         ROUTER=str(self.router), REMOTE_BIN=str(self.remote_bin),
                         EVENT_LOG=str(self.root / 'events'))
+        if UCI_BINARY:
+            self.env['UCI_TEST_BINARY'] = UCI_BINARY
 
     def remote_script(self, name, body):
         path = self.remote_bin / name
@@ -96,7 +114,7 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         return [json.loads(line)['data']['package']
                 for line in (self.root / 'events').read_text().splitlines()]
 
-    def test_pull_edit_push_preserves_bytes_and_secrets_without_nohup(self):
+    def test_pull_edit_push_preserves_public_bytes_without_nohup(self):
         result = self.pull()
         self.assertEqual((self.local / 'firewall').read_bytes(), FIREWALL)
         edited = FIREWALL.replace(b'REJECT', b'ACCEPT')
@@ -196,6 +214,199 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         result = self.run_script('openwrt_pushconfig', host='different-alias')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertFalse((self.repo / 'corewrt/router-identity.pub').exists())
+
+    def wireless(self, anonymous=False):
+        section = b"config wifi-iface\n" if anonymous else b"config wifi-iface 'guest'\n"
+        content = section + b" option ssid 'Guest'\n option encryption 'psk2'\n option key 'one\nsecret\n\n'\n list sae_password 'first'\n list sae_password 'second'\n"
+        (self.config / 'wireless').write_bytes(content)
+        return content
+
+    def uci_value(self, path, directory=None, command='get'):
+        return subprocess.check_output([UCI_BINARY, '-c', str(directory or self.config),
+                                        '-t', str(self.router / 'delta'), command, path])
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_secrets_filtered_on_router_and_preserved_with_multiline_and_lists(self):
+        self.wireless()
+        old_key = self.uci_value('wireless.guest.key')
+        old_list = self.uci_value('wireless.guest.sae_password', command='show')
+        self.pull()
+        local = self.local / 'wireless'
+        self.assertNotIn(b'secret', local.read_bytes())
+        self.assertNotIn(b'option key', local.read_bytes())
+        self.assertNotIn(b'list sae_password', local.read_bytes())
+        required = (self.repo / 'corewrt/secret-paths').read_text()
+        self.assertIn('wireless.guest.key wifi-iface', required)
+        self.assertIn('wireless.guest.sae_password wifi-iface', required)
+        local.write_bytes(local.read_bytes().replace(b'Guest', b'Changed'))
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uci_value('wireless.guest.key'), old_key)
+        self.assertEqual(self.uci_value('wireless.guest.sae_password', command='show'), old_list)
+        self.assertEqual(self.uci_value('wireless.guest.ssid'), b'Changed\n')
+        self.assertNotIn(b'one\nsecret', result.stdout + result.stderr)
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_private_overrides_replace_lists_and_support_quotes(self):
+        self.wireless()
+        self.pull()
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        override = b"config wifi-iface 'guest'\n option key 'new'\\''quoted\n\n'\n list sae_password 'replacement; $(touch /tmp/injected-secrets-test)'\n"
+        (private / 'wireless').write_bytes(override)
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uci_value('wireless.guest.key'), b"new'quoted\n\n\n")
+        self.assertEqual(self.uci_value('wireless.guest.sae_password'), b"'replacement; $(touch /tmp/injected-secrets-test)'\n")
+        self.assertFalse((self.router / 'tmp/injected-secrets-test').exists())
+        self.assertEqual((private / 'wireless').stat().st_mode & 0o777, 0o600)
+        self.assertNotIn(b"new'quoted", result.stdout + result.stderr)
+        result = subprocess.run(['git', '-C', str(self.repo), 'check-ignore', '-q', 'corewrt/secrets/wireless'])
+        self.assertEqual(result.returncode, 0)
+        self.pull()
+        self.assertEqual((private / 'wireless').read_bytes(), override)
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_inline_password_is_rejected_even_with_force_without_leaking_value(self):
+        self.pull()
+        (self.local / 'wireless').write_bytes(b"config wifi-iface 'guest'\n option key 'do-not-print-me'\n")
+        result = self.run_script('openwrt_pushconfig', '--force')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Move inline secrets', result.stderr)
+        self.assertNotIn(b'do-not-print-me', result.stdout + result.stderr)
+        self.assertFalse((self.config / 'wireless').exists())
+        self.assertFalse(list((self.router / 'root').iterdir()))
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_missing_required_secret_and_unknown_override_section_abort(self):
+        self.wireless()
+        self.pull()
+        (self.config / 'wireless').write_bytes(b"config wifi-iface 'guest'\n option ssid 'Guest'\n option encryption 'psk2'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Missing required secret', result.stderr)
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        (private / 'wireless').write_bytes(b"config wifi-iface 'wrong'\n option key 'do-not-print-me'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Secret override section missing', result.stderr)
+        self.assertFalse(list((self.router / 'root').iterdir()))
+        self.assertFalse((self.root / 'events').exists())
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_new_wifi_needs_private_password_and_custom_secret_rules_work(self):
+        self.pull()
+        (self.repo / 'corewrt/secret-options').write_text('credentials\n')
+        public = b"config wifi-iface 'new_guest'\n option encryption 'psk2'\n option ssid 'New'\n"
+        (self.local / 'wireless').write_bytes(public)
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Missing required secret: wireless.new_guest.key', result.stderr)
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        (private / 'wireless').write_bytes(b"config wifi-iface 'new_guest'\n option key 'new-pass'\n list credentials 'first'\n list credentials 'second'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uci_value('wireless.new_guest.key'), b'new-pass\n')
+        self.assertEqual(self.uci_value('wireless.new_guest.credentials'), b'first second\n')
+        self.pull()
+        self.assertNotIn(b'new-pass', (self.local / 'wireless').read_bytes())
+        self.assertNotIn(b'credentials', (self.local / 'wireless').read_bytes())
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_anonymous_secret_section_aborts_pull_without_touching_snapshot(self):
+        self.pull()
+        self.wireless(anonymous=True)
+        (self.local / 'firewall').write_text('local edits')
+        result = self.run_script('openwrt_pullconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'needs a named section', result.stderr)
+        self.assertEqual((self.local / 'firewall').read_text(), 'local edits')
+        self.assertFalse((self.local / 'wireless').exists())
+
+    def test_precommit_scans_staged_content_and_blocks_forced_secret_files(self):
+        self.pull()
+        helper = str(ROOT / 'openwrt_secrets')
+        result = subprocess.run([helper, '--install-hook', str(self.repo)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.local / 'wireless').write_text("config wifi-iface 'guest'; option 'key' 'do-not-print-me'\n")
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'corewrt'], check=True)
+        (self.local / 'wireless').write_text("config wifi-iface 'guest'\n")
+        identity = dict(os.environ, GIT_AUTHOR_NAME='Codex', GIT_AUTHOR_EMAIL='codex@openai.com',
+                        GIT_COMMITTER_NAME='Codex', GIT_COMMITTER_EMAIL='codex@openai.com')
+        result = subprocess.run(['git', '-C', str(self.repo), 'commit', '-m', 'test'], env=identity, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Secret check failed', result.stderr)
+        self.assertNotIn(b'do-not-print-me', result.stdout + result.stderr)
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'corewrt/etc/config/wireless'], check=True)
+        result = subprocess.run(['git', '-C', str(self.repo), 'commit', '-m', 'test'], env=identity, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        (private / 'wireless').write_text("config wifi-iface 'guest'\n option key 'do-not-print-me'\n")
+        subprocess.run(['git', '-C', str(self.repo), 'add', '-f', 'corewrt/secrets/wireless'], check=True)
+        result = subprocess.run(['git', '-C', str(self.repo), 'commit', '-m', 'test'], env=identity, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Secret file must not be staged/tracked', result.stderr)
+        self.assertNotIn(b'do-not-print-me', result.stdout + result.stderr)
+
+    def test_checker_handles_quotes_multiline_values_and_custom_policy(self):
+        self.pull()
+        package = self.local / 'network'
+        package.write_text("config interface 'wan'\n option note 'line one\n option password fake\nline three'\n")
+        helper = str(ROOT / 'openwrt_secrets')
+        result = subprocess.run([helper, '--check', str(self.repo)], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        (self.repo / 'corewrt/secret-options').write_text('credentials\n')
+        package.write_text("config interface 'wan'\n list 'credentials' 'do-not-print-me\nline two'\n")
+        result = subprocess.run([helper, '--check', str(self.repo)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'network.wan.credentials', result.stderr)
+        self.assertNotIn(b'do-not-print-me', result.stdout + result.stderr)
+        subprocess.run(['git', '-C', str(self.repo), 'add', 'corewrt/etc/config/network'], check=True)
+        result = subprocess.run([helper, '--check-staged', str(self.repo)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'network.wan.credentials', result.stderr)
+        package.write_text("config interface 'wan'\n option note 'unterminated\n")
+        result = subprocess.run([helper, '--check', str(self.repo)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'unterminated UCI statement', result.stderr)
+
+    def test_hook_installer_preserves_existing_hook(self):
+        hook = self.repo / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 0\n')
+        result = subprocess.run([str(ROOT / 'openwrt_secrets'), '--install-hook', str(self.repo)], capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(hook.read_text(), '#!/bin/sh\nexit 0\n')
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_secret_override_rejects_nonsecret_options_and_wrong_section_types(self):
+        original = self.wireless()
+        self.pull()
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        for override, expected in (
+                (b"config wifi-iface 'guest'\n option ssid 'Changed'\n", b'non-secret option'),
+                (b"config interface 'guest'\n option key 'do-not-print-me'\n", b'Secret section type mismatch'),
+                (b"config wifi-iface 'guest'\n option key ''\n", b'empty secret override')):
+            with self.subTest(expected=expected):
+                (private / 'wireless').write_bytes(override)
+                result = self.run_script('openwrt_pushconfig')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+                self.assertNotIn(b'do-not-print-me', result.stdout + result.stderr)
+                self.assertEqual((self.config / 'wireless').read_bytes(), original)
+                self.assertFalse(list((self.router / 'root').iterdir()))
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_new_anonymous_wifi_without_key_is_rejected(self):
+        self.pull()
+        (self.local / 'wireless').write_bytes(b"config wifi-iface\n option encryption 'psk2'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Missing required secret', result.stderr)
+        self.assertFalse((self.config / 'wireless').exists())
 
     def setup_apk(self):
         apk = self.router / 'etc/apk'
@@ -318,7 +529,7 @@ fi
 
     def test_old_placeholders_are_rejected_before_upload(self):
         self.pull()
-        (self.local / 'firewall').write_bytes(FIREWALL.replace(b'two\nsecret lines', b'[REDACTED]'))
+        (self.local / 'firewall').write_bytes(FIREWALL + b" option description '[REDACTED]'\n")
         result = self.run_script('openwrt_pushconfig')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(b'old [REDACTED] placeholders', result.stderr)

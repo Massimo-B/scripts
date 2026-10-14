@@ -22,7 +22,8 @@ configured user, port, and identity file).
 
 The destination config directory is mirrored: files removed on the router are
 also removed locally. Local edits there are overwritten. Nothing is staged,
-committed, or pushed. Files are copied unchanged, including passwords and keys.
+committed, or pushed. Known secret options are removed on the router before
+download; secret-paths records which values must be preserved during push.
 
 Options:
   --force      Skip the router hostname check
@@ -54,7 +55,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'NAME must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar rsync mktemp realpath; do
+for command in ssh git tar rsync mktemp realpath grep; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -65,6 +66,17 @@ for path in "$repo/$name" "$repo/$name/etc" "$destination" "$repo/$name/etc/apk"
     [[ ! -L "$path" ]] || die "Destination must not be a symbolic link: $path"
     [[ ! -e "$path" || -d "$path" ]] || die "Destination is not a directory: $path"
 done
+
+# Resolve the companion even when the scripts are installed with a prefix.
+helper="${BASH_SOURCE[0]%_*}_secrets"
+if [[ ! -f "$helper" ]]; then
+    helper="$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/openwrt_secrets"
+fi
+[[ -f "$helper" ]] || die 'Missing companion script: openwrt_secrets'
+remote_secrets=$(bash "$helper" --remote-source)
+policy="$repo/$name/secret-options"
+[[ ! -L "$policy" && ( ! -e "$policy" || -f "$policy" ) ]] || die 'secret-options must be a regular file'
+[[ -z $(git -C "$repo" ls-files -- "$name/secrets") ]] || die 'Secrets are already tracked by Git; remove them from the index before continuing'
 
 # Check in the transfer/installation session before changing either side.
 # NAME is restricted to safe characters by the argument validation above.
@@ -83,14 +95,54 @@ trap 'exit 143' TERM
 printf 'Fetching /etc/config from %s...\n' "$host"
 # Download fully before touching the destination; -T prevents terminal output
 # from corrupting the archive. No scp/SFTP or rsync is needed on the router.
+remote_fetch=$(cat <<'REMOTE'
+set -eu
+umask 077
+fail() { echo "openwrt_pullconfig: $*" >&2; exit 1; }
+for tool in uci awk cat cp tar mktemp; do
+    command -v "$tool" >/dev/null || fail "Missing router dependency: $tool"
+done
+work=$(mktemp -d /tmp/openwrt-pullconfig.XXXXXX)
+trap 'rm -rf "$work"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+mkdir -p "$work/etc/config" "$work/delta"
+cat > "$work/policy"
+changes=$(uci changes 2>/dev/null) || fail 'Cannot inspect pending UCI changes'
+[ -z "$changes" ] || fail 'Commit or revert pending UCI changes before pulling'
+: > "$work/secret-paths"
+for file in /etc/config/*; do
+    [ -e "$file" ] || [ -L "$file" ] || continue
+    package=${file##*/}
+    case "$package" in ''|*[!a-zA-Z0-9_]*) fail 'Unexpected UCI filename' ;; esac
+    [ -f "$file" ] && [ ! -L "$file" ] || fail 'Expected regular UCI files'
+    uci -q -c /etc/config -t "$work/delta" -N export "$package" > "$work/export" 2>/dev/null || fail "Invalid UCI package: $package"
+    : > "$work/package.paths"
+    secrets_filter public "$package" "$work/policy" "$work/package.paths" < "$work/export" > "$work/etc/config/$package" || fail "Cannot sanitize UCI package: $package"
+    if [ -s "$work/package.paths" ]; then
+        cat "$work/package.paths" >> "$work/secret-paths"
+    else
+        cp "$file" "$work/etc/config/$package"
+    fi
+done
+set -- etc/config secret-paths
+if [ -d /etc/apk ]; then
+    cp -Rp /etc/apk "$work/etc/apk"
+    set -- "$@" etc/apk
+fi
+tar -czf - -C "$work" "$@"
+REMOTE
+)
 remote_fetch="$remote_guard
-set -e; set -- etc/config; if [ -d /etc/apk ]; then set -- \"\$@\" etc/apk; fi; tar -czf - -C / \"\$@\""
-ssh -T -- "$host" "$remote_fetch" > "$temporary/config.tar.gz"
+$remote_secrets
+$remote_fetch"
+[[ -f "$policy" ]] || policy=/dev/null
+ssh -T -- "$host" "$remote_fetch" < "$policy" > "$temporary/config.tar.gz"
 
 # Only accept regular UCI files and their parent directory before extraction.
 tar -tzf "$temporary/config.tar.gz" > "$temporary/members"
 while IFS= read -r member; do
-    [[ "$member" == etc/apk || "$member" == etc/apk/ ||
+    [[ "$member" == secret-paths || "$member" == etc/apk || "$member" == etc/apk/ ||
        "$member" =~ ^etc/apk/([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*)?/?$ ||
        "$member" == etc/config || "$member" == etc/config/ ||
        "$member" =~ ^etc/config/[a-zA-Z0-9_]+$ ]] || die "Unexpected archive path: $member"
@@ -111,7 +163,15 @@ source_apk="$temporary/extracted/etc/apk"
 if [[ -d "$source_apk" ]]; then
     [[ -f "$source_apk/world" ]] || die 'APK configuration is missing world'
 fi
+[[ -f "$temporary/extracted/secret-paths" ]] || die 'Archive is missing secret-paths'
+for path in "$repo/$name/secret-paths" "$repo/$name/.gitignore"; do
+    [[ ! -L "$path" && ( ! -e "$path" || -f "$path" ) ]] || die "Expected regular metadata file: $path"
+done
 mkdir -p -- "$destination"
+if ! grep -Fxq '/secrets/' "$repo/$name/.gitignore" 2>/dev/null; then
+    printf '\n/secrets/\n' >> "$repo/$name/.gitignore"
+fi
+git -C "$repo" check-ignore -q -- "$name/secrets/.openwrt-check" || die 'NAME/secrets/ must be ignored by Git'
 # Preserve executable bits, but restrict access to the local owner.
 # Protect any local Git metadata even if a nested repository exists here.
 rsync -rltp --checksum --chmod=Du=rwx,Dgo=,Fu=rwX,Fgo= --delete --exclude=.git -- "$source_config/" "$destination/"
@@ -122,5 +182,6 @@ elif [[ -d "$repo/$name/etc/apk" ]]; then
     mkdir "$temporary/empty"
     rsync -r --delete --exclude=.git -- "$temporary/empty/" "$repo/$name/etc/apk/"
 fi
+cp -- "$temporary/extracted/secret-paths" "$repo/$name/secret-paths"
 printf 'Copied configuration to %s\n' "$destination"
-git -C "$repo" status --short -- "$name/etc/config" "$name/etc/apk"
+git -C "$repo" status --short -- "$name/etc/config" "$name/etc/apk" "$name/secret-paths" "$name/.gitignore"

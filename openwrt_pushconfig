@@ -18,7 +18,9 @@ Copy REPOSITORY/NAME/etc/config and optional etc/apk to OpenWrt over SSH.
 Restore APK repositories and keys, then synchronize packages with saved world.
 Packages no longer required by world or its dependencies are removed.
 The router hostname must equal NAME; --force bypasses this check.
-NAME defaults to openwrt. Files, including secrets, are copied unchanged.
+NAME defaults to openwrt. Missing secret options are retained from the router.
+Explicit overrides belong in ignored NAME/secrets/PACKAGE UCI files; known
+secret options in public etc/config files are rejected.
 Files absent locally are retained on the router. Old [REDACTED] snapshots
 must be replaced with complete configuration files before pushing.
 
@@ -56,7 +58,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'Invalid NAME'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar mktemp realpath grep find; do
+for command in ssh git tar mktemp realpath grep find chmod; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -65,6 +67,17 @@ source_config="$repo/$name/etc/config"
 for path in "$repo/$name" "$repo/$name/etc" "$source_config"; do
     [[ -d "$path" && ! -L "$path" ]] || die "Expected a real directory: $path"
 done
+# Resolve the companion even when the scripts are installed with a prefix.
+helper="${BASH_SOURCE[0]%_*}_secrets"
+if [[ ! -f "$helper" ]]; then
+    helper="$(dirname -- "$(realpath -- "${BASH_SOURCE[0]}")")/openwrt_secrets"
+fi
+[[ -f "$helper" ]] || die 'Missing companion script: openwrt_secrets'
+remote_secrets=$(bash "$helper" --remote-source)
+policy="$repo/$name/secret-options"
+[[ ! -L "$policy" && ( ! -e "$policy" || -f "$policy" ) ]] || die 'secret-options must be a regular file'
+[[ -z $(git -C "$repo" ls-files -- "$name/secrets") ]] || die 'Secrets are already tracked by Git; remove them from the index before continuing'
+
 files=()
 shopt -s nullglob dotglob
 for file in "$source_config"/*; do
@@ -90,6 +103,26 @@ if [[ -e "$source_apk" || -L "$source_apk" ]]; then
     done < <(find "$source_apk" -mindepth 1 -print0)
     [[ -f "$source_apk/world" ]] || die 'APK snapshot is missing world'
 fi
+# Only regular files in the ignored overrides directory can be uploaded.
+source_secrets="$repo/$name/secrets"
+if [[ -e "$source_secrets" || -L "$source_secrets" ]]; then
+    [[ -d "$source_secrets" && ! -L "$source_secrets" ]] || die 'Expected a real secrets directory'
+    git -C "$repo" check-ignore -q -- "$name/secrets/.openwrt-check" || die 'NAME/secrets/ must be ignored by Git (add /secrets/ to NAME/.gitignore)'
+    chmod 700 -- "$source_secrets"
+    for file in "$source_secrets"/*; do
+        package=${file##*/}
+        [[ "$package" =~ ^[a-zA-Z0-9_]+$ && -f "$file" && ! -L "$file" ]] || die 'Expected regular secret override files'
+        [[ -f "$source_config/$package" ]] || die "Secret override has no public configuration: $package"
+        git -C "$repo" check-ignore -q -- "$name/secrets/$package" || die "Secret override must be ignored by Git: secrets/$package"
+        chmod 600 -- "$file"
+        archive_files+=("secrets/$package")
+    done
+fi
+for metadata in secret-options secret-paths; do
+    file="$repo/$name/$metadata"
+    [[ ! -L "$file" && ( ! -e "$file" || -f "$file" ) ]] || die "Expected a regular $metadata file"
+    [[ ! -f "$file" ]] || archive_files+=("$metadata")
+done
 # Check in the transfer/installation session before changing either side.
 # NAME is restricted to safe characters by the argument validation above.
 remote_guard="if [ '$force' = 0 ]; then
@@ -112,7 +145,7 @@ remote_install=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci tar cmp mktemp cp mv ubus sleep; do
+for tool in uci awk tar cmp mktemp cp mv ubus sleep; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool (configuration unchanged)"
 done
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
@@ -156,7 +189,55 @@ for file in "$work"/new/etc/config/*; do
     name=${file##*/}
     [ ! -L "/etc/config/$name" ] || fail 'Router configuration contains a symbolic link'
     [ ! -e "/etc/config/$name" ] || [ -f "/etc/config/$name" ] || fail 'Router package is not a regular file'
-    uci -c "$work/new/etc/config" -P "$work/delta" export "$name" >/dev/null 2>&1 || fail "Invalid UCI package: $name (configuration unchanged)"
+    uci -c "$work/new/etc/config" -t "$work/delta" export "$name" >/dev/null 2>&1 || fail "Invalid UCI package: $name (configuration unchanged)"
+done
+# Validate and merge entirely in the temporary upload before APK or live writes.
+policy=
+[ ! -f "$work/new/secret-options" ] || policy="$work/new/secret-options"
+for file in "$work"/new/etc/config/*; do
+    package=${file##*/}
+    uci -q -c "$work/new/etc/config" -t "$work/delta" -N export "$package" > "$work/export" 2>/dev/null || fail "Invalid UCI package: $package"
+    secrets_filter check "$package" "$policy" '' < "$file" >/dev/null || fail "Move inline secrets to ignored secrets/$package before pushing"
+    if [ -f "/etc/config/$package" ]; then
+        merge_secrets "$work/new/etc/config" /etc/config "$package" "$policy" preserve
+    fi
+    if [ -f "$work/new/secrets/$package" ]; then
+        uci -q -c "$work/new/secrets" -t "$work/delta" -N export "$package" > "$work/export" 2>/dev/null || fail "Invalid secret override: $package"
+        secrets_filter overlay "$package" "$policy" '' < "$work/new/secrets/$package" >/dev/null || fail "Invalid secret override: $package"
+        merge_secrets "$work/new/etc/config" "$work/new/secrets" "$package" "$policy" override
+    fi
+    uci -q -c "$work/new/etc/config" -t "$work/delta" export "$package" >/dev/null 2>&1 || fail "Invalid merged UCI package: $package"
+done
+if [ -f "$work/new/secret-paths" ]; then
+    while read -r path type extra; do
+        [ -n "$path" ] || continue
+        case "$path" in *[!a-zA-Z0-9_.]*|*.*.*.*|.*|*.|*..*) fail 'Invalid secret-paths entry' ;; esac
+        case "$type" in ''|*[!a-zA-Z0-9_-]*) fail 'Invalid secret-paths section type' ;; esac
+        [ -z "$extra" ] || fail 'Invalid secret-paths entry'
+        case "$path" in *.*.*) ;; *) fail 'Invalid secret-paths entry' ;; esac
+        package=${path%%.*}; section=${path%.*}
+        [ -f "$work/new/etc/config/$package" ] || continue
+        target_type=$(uci -q -c "$work/new/etc/config" -t "$work/delta" get "$section") || continue
+        [ "$target_type" = "$type" ] || fail "Secret section type mismatch: $section"
+        uci -q -c "$work/new/etc/config" -t "$work/delta" show "$path" >/dev/null 2>&1 || fail "Missing required secret: $path (provide secrets/$package)"
+    done < "$work/new/secret-paths"
+fi
+# Newly created secured Wi-Fi and WireGuard interfaces also need credentials.
+for file in "$work"/new/etc/config/*; do
+    package=${file##*/}
+    uci -q -c "$work/new/etc/config" -t "$work/delta" -N export "$package" > "$work/export" 2>/dev/null
+    secrets_filter sections "$package" "$policy" '' < "$work/export" > "$work/sections" || fail 'Cannot inspect sections'
+    while read -r section type; do
+        option=
+        if [ "$package" = wireless ] && [ "$type" = wifi-iface ]; then
+            encryption=$(uci -q -c "$work/new/etc/config" -t "$work/delta" get "$section.encryption") || encryption=
+            case "$encryption" in *psk*|*sae*|wep*) option=key ;; esac
+        elif [ "$package" = network ] && [ "$type" = interface ]; then
+            proto=$(uci -q -c "$work/new/etc/config" -t "$work/delta" get "$section.proto") || proto=
+            [ "$proto" != wireguard ] || option=private_key
+        fi
+        [ -z "$option" ] || uci -q -c "$work/new/etc/config" -t "$work/delta" show "$section.$option" >/dev/null 2>&1 || fail "Missing required secret: $section.$option"
+    done < "$work/sections"
 done
 backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"
@@ -210,6 +291,7 @@ echo "Service reload scheduled; router log: $backup/apply.log"
 REMOTE
 )
 remote_install="$remote_guard
+$remote_secrets
 $remote_install"
 printf 'Uploading %s configuration package(s) to %s...\n' "${#files[@]}" "$host"
 if ! ssh -T -- "$host" "$remote_install" < "$temporary/config.tar.gz"; then
