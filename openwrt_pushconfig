@@ -12,11 +12,12 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_pushconfig [--name NAME] SSH_HOST REPOSITORY
+Usage: openwrt_pushconfig [--name NAME] [--force] SSH_HOST REPOSITORY
 
 Copy REPOSITORY/NAME/etc/config and optional etc/apk to OpenWrt over SSH.
 Restore APK repositories and keys, then synchronize packages with saved world.
 Packages no longer required by world or its dependencies are removed.
+The router hostname must equal NAME; --force bypasses this check.
 NAME defaults to openwrt. Files, including secrets, are copied unchanged.
 Files absent locally are retained on the router. Old [REDACTED] snapshots
 must be replaced with complete configuration files before pushing.
@@ -26,6 +27,7 @@ installs and verifies the upload, and schedules service reloads. Network
 changes may disconnect clients or change the router address.
 
 Options:
+  --force      Skip the router hostname check
   --name NAME  Source directory name inside the repository
   --version    Show source date and Git commit ID
   -h, --help   Show this help
@@ -35,6 +37,7 @@ EOF
 die() { printf 'openwrt_pushconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
+force=0
 while (($#)); do
     case "$1" in
         --name)
@@ -42,6 +45,7 @@ while (($#)); do
             name=$2
             shift 2
             ;;
+        --force) force=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
@@ -86,6 +90,16 @@ if [[ -e "$source_apk" || -L "$source_apk" ]]; then
     done < <(find "$source_apk" -mindepth 1 -print0)
     [[ -f "$source_apk/world" ]] || die 'APK snapshot is missing world'
 fi
+# Check in the transfer/installation session before changing either side.
+# NAME is restricted to safe characters by the argument validation above.
+remote_guard="if [ '$force' = 0 ]; then
+    IFS= read -r actual < /proc/sys/kernel/hostname || { echo 'Cannot read router hostname; use --force to bypass the check' >&2; exit 1; }
+    [ \"\$actual\" = '$name' ] || {
+        printf 'Router hostname mismatch: expected %s, got %s. Use --force to proceed anyway.\\n' '$name' \"\$actual\" >&2
+        exit 1
+    }
+fi"
+
 temporary=$(mktemp -d)
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 130' INT
@@ -195,6 +209,8 @@ echo "Configuration installed and verified ($# packages). Backup: $backup/config
 echo "Service reload scheduled; router log: $backup/apply.log"
 REMOTE
 )
+remote_install="$remote_guard
+$remote_install"
 printf 'Uploading %s configuration package(s) to %s...\n' "${#files[@]}" "$host"
 if ! ssh -T -- "$host" "$remote_install" < "$temporary/config.tar.gz"; then
     die 'Push failed; see the router error above. Installation is only confirmed by "Configuration installed and verified".'

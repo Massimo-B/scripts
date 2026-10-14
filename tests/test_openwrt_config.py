@@ -34,6 +34,9 @@ class ConfigCommandTests(unittest.TestCase):
         self.config.mkdir(parents=True)
         (self.router / 'tmp').mkdir()
         (self.router / 'root').mkdir()
+        self.hostname = self.router / 'proc/sys/kernel/hostname'
+        self.hostname.parent.mkdir(parents=True)
+        self.hostname.write_text('corewrt\n')
         (self.config / 'firewall').write_bytes(FIREWALL)
         self.local = self.repo / 'corewrt/etc/config'
         self.bin = self.root / 'bin'
@@ -59,13 +62,9 @@ exit "${UBUS_FAILURE:-0}"
 root = pathlib.Path(os.environ['ROUTER'])
 if os.environ.get('SSH_FAILURE'):
     sys.exit(1)
-if 'tar -czf - -C /' in sys.argv[-1]:
-    paths = ['etc/config']
-    if (root / 'etc/apk').is_dir():
-        paths.append('etc/apk')
-    sys.exit(subprocess.run(['tar', '-czf', '-', '-C', str(root), *paths]).returncode)
 script = sys.argv[-1]
-script = re.sub(r'(?<![a-zA-Z0-9])/etc/config|(?<![a-zA-Z0-9])/etc/apk|/tmp/|/root/', lambda match: str(root) + match[0], script)
+script = re.sub(r'(?<![a-zA-Z0-9])/etc/config|(?<![a-zA-Z0-9])/etc/apk|/proc/sys/kernel/hostname|/tmp/|/root/', lambda match: str(root) + match[0], script)
+script = script.replace('-C / ', '-C ' + str(root) + ' ')
 # Wait only in tests, so events and apply.log can be asserted deterministically.
 if not os.environ.get('DETACHED'):
     script += '\\nstatus=$?\\nwait\\nexit $status\\n'
@@ -84,8 +83,8 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         path.write_text('#!/bin/sh\n' + body)
         path.chmod(0o700)
 
-    def run_script(self, name):
-        return subprocess.run([str(ROOT / name), '--name', 'corewrt', 'root@router', str(self.repo)],
+    def run_script(self, name, *options, host='root@router'):
+        return subprocess.run([str(ROOT / name), '--name', 'corewrt', *options, host, str(self.repo)],
                               env=self.env, capture_output=True, timeout=10)
 
     def pull(self):
@@ -134,6 +133,69 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         self.assertNotEqual(self.run_script('openwrt_pullconfig').returncode, 0)
         self.assertEqual((self.local / 'firewall').read_bytes(), FIREWALL)
         self.assertFalse((self.local / 'link').exists())
+
+    def test_wrong_hostname_pull_preserves_local_snapshot(self):
+        self.pull()
+        (self.local / 'firewall').write_text('local edits')
+        (self.local / 'obsolete').write_text('keep')
+        self.hostname.write_text('otherwrt\n')
+        result = self.run_script('openwrt_pullconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'expected corewrt, got otherwrt', result.stderr)
+        self.assertIn(b'--force', result.stderr)
+        self.assertEqual((self.local / 'firewall').read_text(), 'local edits')
+        self.assertEqual((self.local / 'obsolete').read_text(), 'keep')
+
+    def test_wrong_hostname_first_pull_does_not_create_snapshot(self):
+        self.hostname.write_text('otherwrt\n')
+        result = self.run_script('openwrt_pullconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repo / 'corewrt').exists())
+
+    def test_wrong_hostname_push_has_no_router_side_effects(self):
+        apk = self.setup_apk()
+        self.pull()
+        (self.local / 'firewall').write_text('local edits')
+        self.hostname.write_text('otherwrt\n')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'expected corewrt, got otherwrt', result.stderr)
+        self.assertEqual((self.config / 'firewall').read_bytes(), FIREWALL)
+        self.assertEqual((apk / 'world').read_text(), 'extra@custom\nother>=2\n')
+        self.assertFalse(list((self.router / 'root').iterdir()))
+        self.assertFalse(list((self.router / 'tmp').iterdir()))
+        self.assertFalse((self.router / 'apk-events').exists())
+        self.assertFalse((self.root / 'events').exists())
+
+    def test_force_allows_pull_and_push_with_different_hostname(self):
+        self.hostname.write_text('otherwrt\n')
+        result = self.run_script('openwrt_pullconfig', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.local / 'firewall').read_bytes(), FIREWALL)
+        edited = FIREWALL.replace(b'REJECT', b'ACCEPT')
+        (self.local / 'firewall').write_bytes(edited)
+        result = self.run_script('openwrt_pushconfig', '--force')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.config / 'firewall').read_bytes(), edited)
+
+    def test_missing_hostname_fails_unless_forced(self):
+        self.pull()
+        self.hostname.unlink()
+        for command in ('openwrt_pullconfig', 'openwrt_pushconfig'):
+            result = self.run_script(command)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(b'Cannot read router hostname', result.stderr)
+        self.assertFalse(list((self.router / 'root').iterdir()))
+        for command in ('openwrt_pullconfig', 'openwrt_pushconfig'):
+            result = self.run_script(command, '--force')
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_hostname_matches_name_independently_of_ssh_alias(self):
+        result = self.run_script('openwrt_pullconfig', host='root@corewrt.mgmt')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_script('openwrt_pushconfig', host='different-alias')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.repo / 'corewrt/router-identity.pub').exists())
 
     def setup_apk(self):
         apk = self.router / 'etc/apk'

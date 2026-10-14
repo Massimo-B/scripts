@@ -126,6 +126,21 @@ The default destination is `openwrt/etc/config` inside the repository root;
 For a custom SSH port or identity, define an alias in `~/.ssh/config` and pass it
 as the host. The remote account must be able to read the configuration files.
 
+Both pull and push compare the router's current hostname (from
+`/proc/sys/kernel/hostname`) with `NAME`, the snapshot directory name. An exact
+match is required; SSH aliases and DNS names such as `corewrt.mgmt` do not affect
+this comparison. The check runs in the transfer/installation SSH session before
+changing local or remote files. A mismatch aborts with the expected and actual
+hostname. Use `--force` to bypass this check explicitly:
+
+```bash
+./openwrt_pullconfig --force --name corewrt root@otherwrt /path/to/router-config-repo
+./openwrt_pushconfig --force --name corewrt root@otherwrt /path/to/router-config-repo
+```
+
+`--force` only skips the hostname check; configuration and archive validation
+still apply. No identity file or initial binding is needed.
+
 Each run mirrors the router's files, overwriting local edits and removing files
 that no longer exist remotely in that destination. Downloads and extraction
 finish before the destination is updated. The script displays Git status but
@@ -154,7 +169,8 @@ and standard shell utilities on the router. Neither Python nor `nohup` is needed
 ./openwrt_pushconfig --name corewrt root@10.10.20.1 /path/to/router-config-repo
 ```
 
-Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
+Checks the router hostname against `NAME` before installing anything; `--force`
+skips this check, as described above. Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
 `openwrt_pullconfig`. Edit the local
 files, then push to install and apply them. Files are copied byte for byte,
 including secrets; no values are redacted, merged, or rewritten.

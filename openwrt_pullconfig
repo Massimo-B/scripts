@@ -12,9 +12,10 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_pullconfig [--name NAME] SSH_HOST REPOSITORY
+Usage: openwrt_pullconfig [--name NAME] [--force] SSH_HOST REPOSITORY
 
 Copy /etc/config and, when present, /etc/apk into REPOSITORY/NAME/etc.
+The router hostname must equal NAME; --force bypasses this check.
 NAME defaults to openwrt. Use distinct names when fetching from multiple routers.
 SSH_HOST can be root@192.168.1.1 or an alias from ~/.ssh/config (including its
 configured user, port, and identity file).
@@ -24,6 +25,7 @@ also removed locally. Local edits there are overwritten. Nothing is staged,
 committed, or pushed. Files are copied unchanged, including passwords and keys.
 
 Options:
+  --force      Skip the router hostname check
   --name NAME  Destination directory name inside the repository
   --version              Show source date and Git commit ID
   -h, --help   Show this help
@@ -33,6 +35,7 @@ EOF
 die() { printf 'openwrt_pullconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
+force=0
 while (($#)); do
     case "$1" in
         --name)
@@ -40,6 +43,7 @@ while (($#)); do
             name=$2
             shift 2
             ;;
+        --force) force=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
@@ -62,6 +66,16 @@ for path in "$repo/$name" "$repo/$name/etc" "$destination" "$repo/$name/etc/apk"
     [[ ! -e "$path" || -d "$path" ]] || die "Destination is not a directory: $path"
 done
 
+# Check in the transfer/installation session before changing either side.
+# NAME is restricted to safe characters by the argument validation above.
+remote_guard="if [ '$force' = 0 ]; then
+    IFS= read -r actual < /proc/sys/kernel/hostname || { echo 'Cannot read router hostname; use --force to bypass the check' >&2; exit 1; }
+    [ \"\$actual\" = '$name' ] || {
+        printf 'Router hostname mismatch: expected %s, got %s. Use --force to proceed anyway.\\n' '$name' \"\$actual\" >&2
+        exit 1
+    }
+fi"
+
 temporary=$(mktemp -d)
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 130' INT
@@ -69,7 +83,9 @@ trap 'exit 143' TERM
 printf 'Fetching /etc/config from %s...\n' "$host"
 # Download fully before touching the destination; -T prevents terminal output
 # from corrupting the archive. No scp/SFTP or rsync is needed on the router.
-ssh -T -- "$host" 'set -e; set -- etc/config; if [ -d /etc/apk ]; then set -- "$@" etc/apk; fi; tar -czf - -C / "$@"' > "$temporary/config.tar.gz"
+remote_fetch="$remote_guard
+set -e; set -- etc/config; if [ -d /etc/apk ]; then set -- \"\$@\" etc/apk; fi; tar -czf - -C / \"\$@\""
+ssh -T -- "$host" "$remote_fetch" > "$temporary/config.tar.gz"
 
 # Only accept regular UCI files and their parent directory before extraction.
 tar -tzf "$temporary/config.tar.gz" > "$temporary/members"
