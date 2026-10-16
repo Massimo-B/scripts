@@ -12,9 +12,14 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_pullconfig [--name NAME] [--force] SSH_HOST REPOSITORY
+Usage: openwrt_pullconfig [--name NAME] [--force] [--include PATH] SSH_HOST REPOSITORY
 
 Copy /etc/config and, when present, /etc/apk into REPOSITORY/NAME/etc.
+Also refresh additional files already present locally or selected in extra-paths.
+--include adds a file or directory, relative to the router filesystem root.
+The selection is saved in NAME/extra-paths. Directories are fetched recursively.
+Existing local extra files are overwritten when present on the router; files
+missing on the router are retained locally. File permissions are preserved.
 The router hostname must equal NAME; --force bypasses this check.
 NAME defaults to openwrt. Use distinct names when fetching from multiple routers.
 SSH_HOST can be root@192.168.1.1 or an alias from ~/.ssh/config (including its
@@ -26,6 +31,7 @@ committed, or pushed. Known secret options are removed on the router before
 download; secret-paths records which values must be preserved during push.
 
 Options:
+  --include PATH  Add an extra file or directory (repeatable)
   --force      Skip the router hostname check
   --name NAME  Destination directory name inside the repository
   --version              Show source date and Git commit ID
@@ -37,11 +43,17 @@ die() { printf 'openwrt_pullconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
 force=0
+includes=()
 while (($#)); do
     case "$1" in
         --name)
             (($# >= 2)) || die '--name requires a value'
             name=$2
+            shift 2
+            ;;
+        --include)
+            (($# >= 2)) || die '--include requires a path'
+            includes+=("${2#/}")
             shift 2
             ;;
         --force) force=1; shift ;;
@@ -55,7 +67,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'NAME must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar cat rsync mktemp realpath grep; do
+for command in ssh git tar cat rsync mktemp realpath grep find sort cp chmod; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -93,6 +105,50 @@ temporary=$(mktemp -d)
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+# Only filesystem payload roots are eligible; metadata and UCI/APK are separate.
+valid_extra_path() {
+    [[ "$1" =~ ^(etc|usr|bin|sbin|lib|lib64|opt|root|www|srv)/([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*[a-zA-Z0-9_+-][a-zA-Z0-9._+-]*$ &&
+       "$1" != etc/config && "$1" != etc/config/* && "$1" != etc/apk && "$1" != etc/apk/* &&
+       "/$1/" != */.git/* ]]
+}
+: > "$temporary/extra-paths.unsorted"
+for root in etc usr bin sbin lib lib64 opt root www srv; do
+    base="$repo/$name/$root"
+    [[ -e "$base" || -L "$base" ]] || continue
+    [[ -d "$base" && ! -L "$base" ]] || die "Expected a real directory: $root"
+    find "$base" -mindepth 1 \( -name .git -o -path "$repo/$name/etc/config" -o -path "$repo/$name/etc/apk" \) -prune -o -print0 > "$temporary/extra-candidates"
+    while IFS= read -r -d '' file; do
+        relative=${file#"$repo/$name/"}
+        valid_extra_path "$relative" && [[ ! -L "$file" && ( -d "$file" || -f "$file" ) ]] || die "Invalid extra file path: $relative"
+        [[ ! -f "$file" ]] || printf '%s\n' "$relative" >> "$temporary/extra-paths.unsorted"
+    done < "$temporary/extra-candidates"
+done
+selection="$repo/$name/extra-paths"
+[[ ! -L "$selection" && ( ! -e "$selection" || -f "$selection" ) ]] || die 'extra-paths must be a regular file'
+if [[ -f "$selection" ]]; then
+    while IFS= read -r relative || [[ -n "$relative" ]]; do
+        printf '%s\n' "$relative" >> "$temporary/extra-paths.unsorted"
+    done < "$selection"
+fi
+for relative in "${includes[@]}"; do relative=${relative%/}; printf '%s\n' "$relative" >> "$temporary/extra-paths.unsorted"; done
+sort -u "$temporary/extra-paths.unsorted" > "$temporary/extra-paths"
+# Preflight all selected local paths, including parents of paths not yet present.
+check_extra_destination() {
+    local current="$repo/$name/$1"
+    [[ ! -e "$current" || -f "$current" || -d "$current" ]] || die "Invalid extra destination: $1"
+    while [[ "$current" != "$repo/$name" ]]; do
+        [[ ! -L "$current" ]] || die "Extra destination must not be a symbolic link: $current"
+        current=${current%/*}
+        [[ ! -e "$current" || -d "$current" ]] || die "Expected extra destination directory: $current"
+    done
+}
+while IFS= read -r relative; do
+    valid_extra_path "$relative" || die "Invalid extra selection: $relative"
+    check_extra_destination "$relative"
+done < "$temporary/extra-paths"
+[[ -f "$policy" ]] || policy=/dev/null
+cat -- "$policy" > "$temporary/policy"
+tar -czf "$temporary/request.tar.gz" -C "$temporary" policy extra-paths
 printf 'Fetching /etc/config from %s...\n' "$host"
 # Download fully before touching the destination; -T prevents terminal output
 # from corrupting the archive. No scp/SFTP or rsync is needed on the router.
@@ -100,15 +156,16 @@ remote_fetch=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pullconfig: $*" >&2; exit 1; }
-for tool in uci awk cat cp tar mktemp; do
+for tool in uci awk cat cp tar mktemp find; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool"
 done
 work=$(mktemp -d /tmp/openwrt-pullconfig.XXXXXX)
 trap 'rm -rf "$work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
-mkdir -p "$work/etc/config" "$work/delta"
-cat > "$work/policy"
+mkdir -p "$work/etc/config" "$work/delta" "$work/request" "$work/extra"
+tar -xzf - -C "$work/request"
+cp "$work/request/policy" "$work/policy"
 changes=$(uci changes 2>/dev/null) || fail 'Cannot inspect pending UCI changes'
 [ -z "$changes" ] || fail 'Commit or revert pending UCI changes before pulling'
 : > "$work/secret-paths"
@@ -131,20 +188,64 @@ if [ -d /etc/apk ]; then
     cp -Rp /etc/apk "$work/etc/apk"
     set -- "$@" etc/apk
 fi
-tar -czf - -C "$work" "$@"
+router_root=''
+while IFS= read -r relative; do
+    # Paths were validated locally; reject traversal and metadata again remotely.
+    case "$relative" in
+        etc/config|etc/config/*|etc/apk|etc/apk/*) fail 'Invalid extra selection' ;;
+        etc/*|usr/*|bin/*|sbin/*|lib/*|lib64/*|opt/*|root/*|www/*|srv/*) ;;
+        *) fail 'Invalid extra selection' ;;
+    esac
+    case "/$relative/" in */../*|*/./*|*/.git/*|*//*|*[!a-zA-Z0-9_+./-]*) fail 'Invalid extra selection' ;; esac
+    source=$router_root/$relative
+    parent=$source
+    while [ -n "$parent" ] && [ "$parent" != "$router_root" ]; do
+        [ ! -L "$parent" ] || fail "Extra source must not be a symbolic link: $relative"
+        parent=${parent%/*}
+    done
+    [ -e "$source" ] || continue
+    if [ -d "$source" ]; then
+        mkdir -p "$work/extra/$relative"
+        find "$source" -mindepth 1 -name .git -prune -o -print > "$work/extra-candidates"
+    elif [ -f "$source" ]; then
+        printf '%s\n' "$source" > "$work/extra-candidates"
+    else
+        fail "Expected regular extra source: $relative"
+    fi
+    while IFS= read -r file; do
+        path=${file#"$router_root"/}
+        case "/$path/" in */../*|*/./*|*/.git/*|*//*|*[!a-zA-Z0-9_+./-]*) fail 'Invalid extra source path' ;; esac
+        [ ! -L "$file" ] || fail "Extra source must not be a symbolic link: $path"
+        if [ -d "$file" ]; then
+            mkdir -p "$work/extra/$path"
+        elif [ -f "$file" ]; then
+            mkdir -p "$work/extra/${path%/*}"
+            cp -p "$file" "$work/extra/$path"
+        else
+            fail "Expected regular extra source: $path"
+        fi
+    done < "$work/extra-candidates"
+done < "$work/request/extra-paths"
+tar -czf - -C "$work" "$@" extra
 REMOTE
 )
 remote_fetch="$remote_guard
 $remote_secrets
 $remote_fetch"
-[[ -f "$policy" ]] || policy=/dev/null
-if ! { printf '%s\n' "$remote_fetch" __OPENWRT_SCRIPT_END__; cat -- "$policy"; } | ssh -T -- "$host" "$remote_bootstrap" > "$temporary/config.tar.gz"; then
+if ! { printf '%s\n' "$remote_fetch" __OPENWRT_SCRIPT_END__; cat -- "$temporary/request.tar.gz"; } | ssh -T -- "$host" "$remote_bootstrap" > "$temporary/config.tar.gz"; then
     die 'Download failed; local snapshot was not updated'
 fi
 
 # Only accept regular UCI files and their parent directory before extraction.
 tar -tzf "$temporary/config.tar.gz" > "$temporary/members"
 while IFS= read -r member; do
+    if [[ "$member" == extra || "$member" == extra/ ]]; then continue; fi
+    if [[ "$member" == extra/* ]]; then
+        path=${member#extra/}; path=${path%/}
+        case "$path" in etc|usr|bin|sbin|lib|lib64|opt|root|www|srv) continue ;; esac
+        valid_extra_path "$path" || die "Unexpected extra archive path: $member"
+        continue
+    fi
     [[ "$member" == secret-paths || "$member" == etc/apk || "$member" == etc/apk/ ||
        "$member" =~ ^etc/apk/([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*)?/?$ ||
        "$member" == etc/config || "$member" == etc/config/ ||
@@ -155,7 +256,7 @@ while IFS= read -r entry; do
     [[ "$entry" == [-d]* ]] || die 'Archive contains a link or special file'
 done < "$temporary/types"
 mkdir "$temporary/extracted"
-tar -xzf "$temporary/config.tar.gz" -C "$temporary/extracted" --no-same-owner --no-same-permissions
+tar -xzf "$temporary/config.tar.gz" -C "$temporary/extracted" --no-same-owner --same-permissions
 source_config="$temporary/extracted/etc/config"
 [[ -d "$source_config" ]] || die 'Archive does not contain an /etc/config directory'
 shopt -s nullglob dotglob
@@ -170,6 +271,18 @@ fi
 for path in "$repo/$name/secret-paths" "$repo/$name/.gitignore"; do
     [[ ! -L "$path" && ( ! -e "$path" || -f "$path" ) ]] || die "Expected regular metadata file: $path"
 done
+# Validate returned paths and type changes before updating any local files.
+while IFS= read -r member; do
+    [[ "$member" == extra/* ]] || continue
+    relative=${member#extra/}; relative=${relative%/}
+    [[ -n "$relative" ]] || continue
+    check_extra_destination "$relative"
+    source="$temporary/extracted/extra/$relative"
+    target="$repo/$name/$relative"
+    if [[ -e "$target" ]]; then
+        [[ ( -d "$source" && -d "$target" ) || ( -f "$source" && -f "$target" ) ]] || die "Extra source/destination type mismatch: $relative"
+    fi
+done < "$temporary/members"
 mkdir -p -- "$destination"
 if ! grep -Fxq '/secrets/' "$repo/$name/.gitignore" 2>/dev/null; then
     printf '\n/secrets/\n' >> "$repo/$name/.gitignore"
@@ -185,6 +298,20 @@ elif [[ -d "$repo/$name/etc/apk" ]]; then
     mkdir "$temporary/empty"
     rsync -r --delete --exclude=.git -- "$temporary/empty/" "$repo/$name/etc/apk/"
 fi
+chmod -R u-s,g-s,o-t -- "$temporary/extracted/extra"
+while IFS= read -r relative; do
+    source="$temporary/extracted/extra/$relative"
+    target="$repo/$name/$relative"
+    if [[ -d "$source" ]]; then
+        mkdir -p -- "$target"
+        rsync -rltp --checksum --exclude=.git --chmod=Du=rwx,Dgo= -- "$source/" "$target/"
+    elif [[ -f "$source" ]]; then
+        mkdir -p -- "${target%/*}"
+        rsync -ltp --checksum -- "$source" "$target"
+        chmod u-s,g-s,o-t -- "$target"
+    fi
+done < "$temporary/extra-paths"
+cp -- "$temporary/extra-paths" "$selection"
 cp -- "$temporary/extracted/secret-paths" "$repo/$name/secret-paths"
 printf 'Copied configuration to %s\n' "$destination"
-git -C "$repo" status --short -- "$name/etc/config" "$name/etc/apk" "$name/secret-paths" "$name/.gitignore"
+git -C "$repo" status --short -- "$name"

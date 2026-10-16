@@ -183,7 +183,32 @@ and standard shell utilities on the router. Neither Python nor `nohup` is needed
 Checks the router hostname against `NAME` before installing anything; `--force`
 skips this check, as described above. Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
 `openwrt_pullconfig`. Edit the local
-files, then push to install and apply them. Known secret options in public files
+files, then push to install and apply them. Push also installs additional regular
+files under `NAME/etc`, `NAME/usr`, `NAME/bin`, `NAME/sbin`, `NAME/lib`,
+`NAME/lib64`, `NAME/opt`, `NAME/root`, `NAME/www`, and `NAME/srv`. For example,
+`corewrt/etc/dnsmasq.conf` becomes `/etc/dnsmasq.conf`, and
+`corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh` becomes
+`/usr/lib/dnsmasq/dhcp-short-aliases.sh`. This includes test files stored under
+these directories. File permissions, including executable bits, are preserved;
+special permission bits are cleared. Local symlinks and symlinked destination
+paths are refused. Additional files are backed up under `BACKUP/files/` and
+restored if installation fails; files absent locally are retained on the router.
+Pull also refreshes additional files already present locally. To select a new
+file or recursively fetch a directory, use repeatable `--include` options:
+
+```bash
+./openwrt_pullconfig --name corewrt --include etc/dnsmasq.conf --include usr/lib/dnsmasq root@corewrt.mgmt .
+```
+
+Pull saves the selection in `NAME/extra-paths` for subsequent pulls; keep this
+file in Git. Additional files present on the router overwrite local edits,
+preserving file permissions and executable bits. Local additional files missing
+on the router are retained. UCI and APK directories retain their existing mirror
+behavior. Additional file contents are copied verbatim; the UCI secrets filter
+applies only to `etc/config`. Repository metadata and `NAME/secrets` are not
+copied into the router filesystem.
+
+Known secret options in public files
 are rejected. Missing secret options are copied from the existing matching
 router sections. Explicit overrides from ignored `NAME/secrets/PACKAGE` UCI
 files take precedence. Overrides may contain only protected options, in sections

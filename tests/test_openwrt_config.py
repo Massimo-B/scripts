@@ -46,7 +46,7 @@ class ConfigCommandTests(unittest.TestCase):
         self.remote_bin.mkdir()
         # Model a minimal router: no Python, Bash, rsync, or nohup in PATH.
         for command in ('tar', 'gzip', 'cmp', 'mktemp', 'cp', 'mv', 'sleep',
-                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat'):
+                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find'):
             (self.remote_bin / command).symlink_to(shutil.which(command))
         self.remote_script('uci', '''if [ "$1" = changes ]; then
     printf '%s' "${PENDING:-}"
@@ -88,6 +88,7 @@ if not marker:
 script = body.decode()
 script = re.sub(r'(?<![a-zA-Z0-9])/etc/config|(?<![a-zA-Z0-9])/etc/apk|/proc/sys/kernel/hostname|/tmp/|/root/', lambda match: str(root) + match[0], script)
 script = script.replace('-C / ', '-C ' + str(root) + ' ')
+script = script.replace("router_root=''", "router_root=" + repr(str(root)))
 # Wait only in tests, so events and apply.log can be asserted deterministically.
 if not os.environ.get('DETACHED'):
     script += '\\nstatus=$?\\nwait\\nexit $status\\n'
@@ -142,6 +143,145 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         self.assertNotIn(b'secret lines', result.stdout + result.stderr)
         self.assertFalse((self.remote_bin / 'nohup').exists())
         self.assertEqual((self.config / 'firewall').stat().st_mode & 0o777, 0o600)
+
+    def extra_files(self):
+        etc = self.repo / 'corewrt/etc/dnsmasq.conf'
+        etc.write_text('dhcp-script=/usr/lib/dnsmasq/dhcp-short-aliases.sh\n')
+        etc.chmod(0o644)
+        script = self.repo / 'corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh'
+        script.parent.mkdir(parents=True)
+        script.write_text('#!/bin/sh\nexit 0\n')
+        script.chmod(0o755)
+        return etc, script
+
+    def test_push_additional_files_with_permissions_and_backup(self):
+        self.pull()
+        etc, script = self.extra_files()
+        old = self.router / 'etc/dnsmasq.conf'
+        old.write_text('old configuration\n')
+        unrelated = self.router / 'etc/unrelated'
+        unrelated.write_text('keep')
+        for _ in range(2):
+            result = self.run_script('openwrt_pushconfig')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(b'Additional files installed and verified (2 files)', result.stdout)
+            self.assertEqual(old.read_bytes(), etc.read_bytes())
+            installed = self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh'
+            self.assertEqual(installed.read_bytes(), script.read_bytes())
+            self.assertEqual(installed.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(old.stat().st_mode & 0o777, 0o644)
+            self.assertEqual(unrelated.read_text(), 'keep')
+        backups = list((self.router / 'root').glob('*/files/etc/dnsmasq.conf'))
+        self.assertTrue(any(path.read_text() == 'old configuration\n' for path in backups))
+        self.assertFalse((self.router / '.gitignore').exists())
+        self.assertFalse((self.router / 'secret-paths').exists())
+        # A new pull also retrieves the managed additional files.
+        self.pull()
+        self.assertEqual(script.read_text(), '#!/bin/sh\nexit 0\n')
+
+    def test_pull_refreshes_extra_files_and_retains_files_missing_on_router(self):
+        self.pull()
+        etc, script = self.extra_files()
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        remote = self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh'
+        remote.write_text('#!/bin/sh\necho updated\n')
+        remote.chmod(0o755)
+        (self.router / 'etc/dnsmasq.conf').write_text('updated configuration\n')
+        self.pull()
+        self.assertEqual(script.read_bytes(), remote.read_bytes())
+        self.assertEqual(script.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(etc.read_text(), 'updated configuration\n')
+        remote.unlink()
+        self.pull()
+        self.assertTrue(script.exists())
+        script.unlink()
+        paths = (self.repo / 'corewrt/extra-paths').read_text()
+        self.assertIn('usr/lib/dnsmasq/dhcp-short-aliases.sh', paths)
+        remote.write_text('#!/bin/sh\necho recreated\n')
+        remote.chmod(0o755)
+        self.pull()
+        self.assertEqual(script.read_bytes(), remote.read_bytes())
+
+    def test_pull_included_directory_discovers_files_and_retains_local_extras(self):
+        directory = self.router / 'usr/lib/dnsmasq'
+        directory.mkdir(parents=True)
+        (directory / 'first.sh').write_text('first')
+        (directory / 'first.sh').chmod(0o755)
+        result = self.run_script('openwrt_pullconfig', '--include', '/usr/lib/dnsmasq/')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        local = self.repo / 'corewrt/usr/lib/dnsmasq'
+        self.assertEqual((local / 'first.sh').read_text(), 'first')
+        self.assertEqual((local / 'first.sh').stat().st_mode & 0o777, 0o755)
+        (directory / 'first.sh').unlink()
+        (directory / 'second.sh').write_text('second')
+        self.pull()
+        self.assertEqual((local / 'first.sh').read_text(), 'first')
+        self.assertEqual((local / 'second.sh').read_text(), 'second')
+
+    def test_pull_extra_symlink_or_invalid_selection_keeps_snapshot(self):
+        self.pull()
+        firewall = self.local / 'firewall'
+        firewall.write_text('keep local changes')
+        usr = self.router / 'usr'
+        usr.mkdir()
+        (usr / 'bad').symlink_to(self.router / 'etc', target_is_directory=True)
+        result = self.run_script('openwrt_pullconfig', '--include', 'usr/bad/dnsmasq.conf')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'must not be a symbolic link', result.stderr)
+        self.assertEqual(firewall.read_text(), 'keep local changes')
+        for path in ('etc/config', 'etc/config/system', 'usr/../etc/passwd', 'usr/.git/config'):
+            with self.subTest(path=path):
+                result = self.run_script('openwrt_pullconfig', '--include', path)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'Invalid extra selection', result.stderr)
+                self.assertEqual(firewall.read_text(), 'keep local changes')
+
+    def test_additional_files_roll_back_when_uci_install_fails(self):
+        self.pull()
+        self.extra_files()
+        old = self.router / 'etc/dnsmasq.conf'
+        old.write_text('old configuration\n')
+        old.chmod(0o640)
+        self.remote_script('mv', 'case "$3" in */firewall) exit 1;; esac\nexec /bin/mv "$@"\n')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(old.read_text(), 'old configuration\n')
+        self.assertEqual(old.stat().st_mode & 0o777, 0o640)
+        self.assertFalse((self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh').exists())
+        self.assertFalse((self.root / 'events').exists())
+
+    def test_additional_file_move_failure_restores_previous_files(self):
+        self.pull()
+        self.extra_files()
+        old = self.router / 'etc/dnsmasq.conf'
+        old.write_text('old configuration\n')
+        for status in (1, 0):
+            with self.subTest(status=status):
+                self.remote_script('mv', f'case "$3" in */dhcp-short-aliases.sh) exit {status};; esac\nexec /bin/mv "$@"\n')
+                result = self.run_script('openwrt_pushconfig')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(old.read_text(), 'old configuration\n')
+                self.assertFalse((self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh').exists())
+                self.assertEqual((self.config / 'firewall').read_bytes(), FIREWALL)
+                self.assertFalse(list((self.router / 'usr/lib/dnsmasq').glob('.openwrt_pushconfig.*')))
+                self.assertFalse((self.root / 'events').exists())
+
+    def test_additional_files_reject_symlinks_before_installation(self):
+        self.pull()
+        self.extra_files()
+        usr = self.repo / 'corewrt/usr'
+        (usr / 'link').symlink_to('/etc/passwd')
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Invalid extra file path', result.stderr)
+        (usr / 'link').unlink()
+        (self.router / 'usr').symlink_to(self.router / 'root', target_is_directory=True)
+        result = self.run_script('openwrt_pushconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Expected real destination directory', result.stderr)
+        self.assertFalse(list((self.router / 'root').iterdir()))
+        self.assertFalse((self.router / 'etc/dnsmasq.conf').exists())
 
     def test_pull_mirrors_deletions(self):
         self.pull()
