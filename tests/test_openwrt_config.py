@@ -315,15 +315,59 @@ sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
         self.assertNotIn(b'credentials', (self.local / 'wireless').read_bytes())
 
     @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
-    def test_anonymous_secret_section_aborts_pull_without_touching_snapshot(self):
-        self.pull()
+    def test_anonymous_secrets_roundtrip_and_overrides(self):
         self.wireless(anonymous=True)
-        (self.local / 'firewall').write_text('local edits')
-        result = self.run_script('openwrt_pullconfig')
+        # Named sections of the same type also count in UCI positional indices.
+        radius = (b"config server 'named'\n option host 'named'\n"
+                  b"config server\n option host 'first'\n option key 'first-secret'\n"
+                  b"config server\n option host 'second'\n option key 'second-secret'\n")
+        (self.config / 'radius').write_bytes(radius)
+        old_key = self.uci_value('wireless.@wifi-iface[0].key')
+        old_list = self.uci_value('wireless.@wifi-iface[0].sae_password')
+        self.pull()
+        self.assertNotIn(b'secret', (self.local / 'radius').read_bytes())
+        self.assertNotIn(b'option key', (self.local / 'wireless').read_bytes())
+        self.assertIn('radius.@server[1].key server',
+                      (self.repo / 'corewrt/secret-paths').read_text())
+        for _ in range(2):
+            result = self.run_script('openwrt_pushconfig')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(self.uci_value('radius.@server[1].key'), b'first-secret\n')
+            self.assertEqual(self.uci_value('radius.@server[2].key'), b'second-secret\n')
+            self.assertEqual(self.uci_value('wireless.@wifi-iface[0].key'), old_key)
+            self.assertEqual(self.uci_value('wireless.@wifi-iface[0].sae_password'), old_list)
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        (private / 'radius').write_bytes(
+            b"config server 'named'\nconfig server\nconfig server\n option key 'replacement'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uci_value('radius.@server[1].key'), b'first-secret\n')
+        self.assertEqual(self.uci_value('radius.@server[2].key'), b'replacement\n')
+
+    @unittest.skipUnless(UCI_BINARY, 'Set UCI_TEST_BINARY for real UCI integration tests')
+    def test_anonymous_section_reorder_requires_explicit_secrets(self):
+        (self.config / 'radius').write_bytes(
+            b"config server\n option host 'first'\n option key 'first-secret'\n"
+            b"config server\n option host 'second'\n option key 'second-secret'\n")
+        original = (self.config / 'radius').read_bytes()
+        self.pull()
+        local = self.local / 'radius'
+        local.write_bytes(local.read_bytes().replace(b'first', b'temp').replace(b'second', b'first').replace(b'temp', b'second'))
+        result = self.run_script('openwrt_pushconfig')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'needs a named section', result.stderr)
-        self.assertEqual((self.local / 'firewall').read_text(), 'local edits')
-        self.assertFalse((self.local / 'wireless').exists())
+        self.assertIn(b'Missing required secret', result.stderr)
+        self.assertEqual((self.config / 'radius').read_bytes(), original)
+        self.assertFalse(list((self.router / 'root').iterdir()))
+        private = self.repo / 'corewrt/secrets'
+        private.mkdir()
+        (private / 'radius').write_bytes(
+            b"config server\n option key 'second-secret'\n"
+            b"config server\n option key 'first-secret'\n")
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.uci_value('radius.@server[0].key'), b'second-secret\n')
+        self.assertEqual(self.uci_value('radius.@server[1].key'), b'first-secret\n')
 
     def test_precommit_scans_staged_content_and_blocks_forced_secret_files(self):
         self.pull()

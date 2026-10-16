@@ -190,8 +190,21 @@ files take precedence. Overrides may contain only protected options, in sections
 already defined in the public files with the same name and type. Lists are
 replaced, not appended; quoting and multiline values are retained. Empty secret
 overrides are rejected because UCI interprets empty string options as removal.
-Sections containing secrets must be named. Anonymous secret-bearing sections
-are refused, so a section reorder cannot attach passwords to another section.
+Anonymous sections are supported through UCI references such as
+`radius.@server[0].key` in `secret-paths`. Their secrets are preserved only when
+the public anonymous sections (including their order) match the router. If you
+edit or reorder them, supply their secrets explicitly in `NAME/secrets/PACKAGE`;
+push rejects missing required values rather than assigning secrets by an
+uncertain position. Named sections remain preferable when editing frequently.
+For anonymous overrides, include preceding sections of the same type as empty
+`config` declarations, including named ones, so UCI indices match the public file.
+For example, to override the second anonymous server:
+
+```uci
+config server
+config server
+    option key 'replacement-secret'
+```
 
 Example public file `corewrt/etc/config/wireless`:
 

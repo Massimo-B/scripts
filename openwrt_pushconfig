@@ -211,11 +211,18 @@ done
 if [ -f "$work/new/secret-paths" ]; then
     while read -r path type extra; do
         [ -n "$path" ] || continue
-        case "$path" in *[!a-zA-Z0-9_.]*|*.*.*.*|.*|*.|*..*) fail 'Invalid secret-paths entry' ;; esac
+        case "$path" in *[!a-zA-Z0-9_.@\[\]-]*|*.*.*.*|.*|*.|*..*) fail 'Invalid secret-paths entry' ;; esac
         case "$type" in ''|*[!a-zA-Z0-9_-]*) fail 'Invalid secret-paths section type' ;; esac
         [ -z "$extra" ] || fail 'Invalid secret-paths entry'
         case "$path" in *.*.*) ;; *) fail 'Invalid secret-paths entry' ;; esac
         package=${path%%.*}; section=${path%.*}
+        option=${path##*.}
+        case "$package:$option" in *[!a-zA-Z0-9_:]*|:*|*:) fail 'Invalid secret-paths entry' ;; esac
+        ref=${section#*.}
+        case "$ref" in
+            @*) printf '%s\n' "$ref" | awk '/^@[a-zA-Z0-9_-]+\[[0-9]+\]$/ { valid=1 } END { exit !valid }' || fail "Invalid anonymous secret reference: $ref" ;;
+            ''|*[!a-zA-Z0-9_]*) fail 'Invalid secret section name' ;;
+        esac
         [ -f "$work/new/etc/config/$package" ] || continue
         target_type=$(uci -q -c "$work/new/etc/config" -t "$work/delta" get "$section") || continue
         [ "$target_type" = "$type" ] || fail "Secret section type mismatch: $section"
