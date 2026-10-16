@@ -58,7 +58,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'Invalid NAME'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar mktemp realpath grep find chmod; do
+for command in ssh git tar cat mktemp realpath grep find chmod; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -74,6 +74,7 @@ if [[ ! -f "$helper" ]]; then
 fi
 [[ -f "$helper" ]] || die 'Missing companion script: openwrt_secrets'
 remote_secrets=$(bash "$helper" --remote-source)
+remote_bootstrap=$(bash "$helper" --ssh-bootstrap)
 policy="$repo/$name/secret-options"
 [[ ! -L "$policy" && ( ! -e "$policy" || -f "$policy" ) ]] || die 'secret-options must be a regular file'
 [[ -z $(git -C "$repo" ls-files -- "$name/secrets") ]] || die 'Secrets are already tracked by Git; remove them from the index before continuing'
@@ -301,6 +302,6 @@ remote_install="$remote_guard
 $remote_secrets
 $remote_install"
 printf 'Uploading %s configuration package(s) to %s...\n' "${#files[@]}" "$host"
-if ! ssh -T -- "$host" "$remote_install" < "$temporary/config.tar.gz"; then
+if ! { printf '%s\n' "$remote_install" __OPENWRT_SCRIPT_END__; cat -- "$temporary/config.tar.gz"; } | ssh -T -- "$host" "$remote_bootstrap"; then
     die 'Push failed; see the router error above. Installation is only confirmed by "Configuration installed and verified".'
 fi

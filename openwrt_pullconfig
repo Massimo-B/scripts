@@ -55,7 +55,7 @@ done
 [[ "$name" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]] || die 'NAME must start with a letter or digit and contain only letters, digits, dots, underscores, or hyphens'
 host=$1
 [[ -n "$host" && "$host" != -* ]] || die 'Invalid SSH host'
-for command in ssh git tar rsync mktemp realpath grep; do
+for command in ssh git tar cat rsync mktemp realpath grep; do
     command -v "$command" >/dev/null || die "Missing dependency: $command"
 done
 repo=$(git -C "$2" rev-parse --show-toplevel) || die 'REPOSITORY must be a Git working tree'
@@ -74,6 +74,7 @@ if [[ ! -f "$helper" ]]; then
 fi
 [[ -f "$helper" ]] || die 'Missing companion script: openwrt_secrets'
 remote_secrets=$(bash "$helper" --remote-source)
+remote_bootstrap=$(bash "$helper" --ssh-bootstrap)
 policy="$repo/$name/secret-options"
 [[ ! -L "$policy" && ( ! -e "$policy" || -f "$policy" ) ]] || die 'secret-options must be a regular file'
 [[ -z $(git -C "$repo" ls-files -- "$name/secrets") ]] || die 'Secrets are already tracked by Git; remove them from the index before continuing'
@@ -137,7 +138,9 @@ remote_fetch="$remote_guard
 $remote_secrets
 $remote_fetch"
 [[ -f "$policy" ]] || policy=/dev/null
-ssh -T -- "$host" "$remote_fetch" < "$policy" > "$temporary/config.tar.gz"
+if ! { printf '%s\n' "$remote_fetch" __OPENWRT_SCRIPT_END__; cat -- "$policy"; } | ssh -T -- "$host" "$remote_bootstrap" > "$temporary/config.tar.gz"; then
+    die 'Download failed; local snapshot was not updated'
+fi
 
 # Only accept regular UCI files and their parent directory before extraction.
 tar -tzf "$temporary/config.tar.gz" > "$temporary/members"

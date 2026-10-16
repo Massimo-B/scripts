@@ -78,14 +78,23 @@ exit "${UBUS_FAILURE:-0}"
 root = pathlib.Path(os.environ['ROUTER'])
 if os.environ.get('SSH_FAILURE'):
     sys.exit(1)
-script = sys.argv[-1]
+bootstrap = sys.argv[-1]
+if len(bootstrap.encode()) > 9000:
+    sys.exit(255)
+wire = sys.stdin.buffer.read()
+body, marker, payload = wire.partition(b'__OPENWRT_SCRIPT_END__\\n')
+if not marker:
+    sys.exit(1)
+script = body.decode()
 script = re.sub(r'(?<![a-zA-Z0-9])/etc/config|(?<![a-zA-Z0-9])/etc/apk|/proc/sys/kernel/hostname|/tmp/|/root/', lambda match: str(root) + match[0], script)
 script = script.replace('-C / ', '-C ' + str(root) + ' ')
 # Wait only in tests, so events and apply.log can be asserted deterministically.
 if not os.environ.get('DETACHED'):
     script += '\\nstatus=$?\\nwait\\nexit $status\\n'
 env = dict(os.environ, PATH=os.environ['REMOTE_BIN'])
-sys.exit(subprocess.run(['/bin/sh', '-c', script], env=env).returncode)
+bootstrap = bootstrap.replace('/tmp/', str(root) + '/tmp/')
+wire = script.encode() + b'\\n__OPENWRT_SCRIPT_END__\\n' + payload
+sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).returncode)
 ''')
         fake_ssh.chmod(0o700)
         self.env = dict(os.environ, PATH=str(self.bin) + ':' + os.environ['PATH'],
