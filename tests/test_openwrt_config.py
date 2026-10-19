@@ -1,9 +1,9 @@
 # BEGIN SCRIPT VERSION
-# Source version: 2026-10-20 (Git 13e9dff)
+# Source version: 2026-10-20 (Git a5b765e)
 if __name__ == '__main__':
     import sys
     if sys.argv[1:2] == ['--version']:
-        print('test_openwrt_config.py 2026-10-20 (Git 13e9dff)')
+        print('test_openwrt_config.py 2026-10-20 (Git a5b765e)')
         sys.exit(0)
 # END SCRIPT VERSION
 import io
