@@ -6,12 +6,14 @@ if __name__ == '__main__':
         print('test_openwrt_config.py 2026-10-20 (Git 13e9dff)')
         sys.exit(0)
 # END SCRIPT VERSION
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import unittest
@@ -46,7 +48,7 @@ class ConfigCommandTests(unittest.TestCase):
         self.remote_bin.mkdir()
         # Model a minimal router: no Python, Bash, rsync, or nohup in PATH.
         for command in ('tar', 'gzip', 'cmp', 'mktemp', 'cp', 'mv', 'sleep',
-                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find'):
+                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find', 'readlink'):
             (self.remote_bin / command).symlink_to(shutil.which(command))
         self.remote_script('uci', '''if [ "$1" = changes ]; then
     printf '%s' "${PENDING:-}"
@@ -243,17 +245,94 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
                 self.assertIn(b'Invalid extra selection', result.stderr)
                 self.assertEqual(firewall.read_text(), 'keep local changes')
 
-    def test_pull_local_resolv_symlink_reports_cause_and_keeps_snapshot(self):
+    def test_extra_symlinks_roundtrip_and_type_changes(self):
+        self.pull()
+        local = self.local.parent / 'resolv.conf'
+        remote = self.config.parent / 'resolv.conf'
+        # Absolute, relative, dangling and directory links retain literal targets.
+        for target in ('/tmp/resolv.conf', '../tmp/missing', str(self.router / 'root')):
+            with self.subTest(target=target):
+                if remote.exists() or remote.is_symlink():
+                    remote.unlink()
+                remote.symlink_to(target)
+                if not local.exists() and not local.is_symlink():
+                    local.write_text('old regular file')
+                self.pull()
+                self.assertTrue(local.is_symlink())
+                self.assertEqual(os.readlink(local), target)
+                remote.unlink()
+                remote.write_text('replace regular file')
+                result = self.run_script('openwrt_pushconfig')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(remote.is_symlink())
+                self.assertEqual(os.readlink(remote), target)
+                remote.unlink()
+                remote.symlink_to(str(self.router / 'root'))
+                local.unlink()
+                local.write_text('restored regular file')
+                result = self.run_script('openwrt_pushconfig')
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertFalse(remote.is_symlink())
+                self.assertEqual(remote.read_text(), 'restored regular file')
+                local.unlink()
+                local.symlink_to(str(self.router / 'root'))
+                self.pull()
+                self.assertFalse(local.is_symlink())
+                self.assertEqual(local.read_text(), 'restored regular file')
+
+    def test_pull_included_directory_preserves_symlinks(self):
+        directory = self.router / 'usr/share/custom'
+        directory.mkdir(parents=True)
+        (directory / 'link').symlink_to('/missing/absolute-target')
+        result = self.run_script('openwrt_pullconfig', '--include', 'usr/share/custom')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        link = self.repo / 'corewrt/usr/share/custom/link'
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.readlink(link), '/missing/absolute-target')
+        self.pull()
+        self.assertEqual(os.readlink(link), '/missing/absolute-target')
+
+    def test_pull_archive_cannot_write_through_symlink(self):
         self.pull()
         firewall = self.local / 'firewall'
         firewall.write_text('keep local changes')
-        link = self.local.parent / 'resolv.conf'
-        link.symlink_to('/tmp/resolv.conf')
-        result = self.run_script('openwrt_pullconfig')
+        outside = self.root / 'outside'
+        outside.mkdir()
+        for link_first in (True, False):
+            with self.subTest(link_first=link_first):
+                archive = io.BytesIO()
+                with tarfile.open(fileobj=archive, mode='w:gz') as bundle:
+                    link = tarfile.TarInfo('extra/etc/link')
+                    link.type = tarfile.SYMTYPE
+                    link.linkname = str(outside)
+                    child = tarfile.TarInfo('extra/etc/link/escaped')
+                    child.size = 4
+                    entries = (link, child) if link_first else (child, link)
+                    for entry in entries:
+                        bundle.addfile(entry, io.BytesIO(b'oops') if entry is child else None)
+                ssh = self.bin / 'ssh'
+                ssh.write_text(f'#!{sys.executable}\nimport sys\nsys.stdin.buffer.read()\n'
+                               f'sys.stdout.buffer.write({archive.getvalue()!r})\n')
+                result = self.run_script('openwrt_pullconfig')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(b'Archive path traverses a symbolic link', result.stderr)
+                self.assertEqual(firewall.read_text(), 'keep local changes')
+                self.assertFalse((outside / 'escaped').exists())
+
+    def test_extra_symlink_rollback_preserves_original_link(self):
+        self.pull()
+        local = self.local.parent / 'resolv.conf'
+        remote = self.config.parent / 'resolv.conf'
+        local.symlink_to('/tmp/new-target')
+        remote.symlink_to('/tmp/original-target')
+        self.remote_script('mv', 'case "$3" in */firewall) exit 1;; esac\nexec /bin/mv "$@"\n')
+        result = self.run_script('openwrt_pushconfig')
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'Extra destination must not be a symbolic link: etc/resolv.conf', result.stderr)
-        self.assertTrue(link.is_symlink())
-        self.assertEqual(firewall.read_text(), 'keep local changes')
+        self.assertTrue(remote.is_symlink())
+        self.assertEqual(os.readlink(remote), '/tmp/original-target')
+        backup, = (self.router / 'root').glob('*/files/etc/resolv.conf')
+        self.assertTrue(backup.is_symlink())
+        self.assertEqual(os.readlink(backup), '/tmp/original-target')
 
     def test_additional_files_roll_back_when_uci_install_fails(self):
         self.pull()
@@ -285,15 +364,10 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
                 self.assertFalse(list((self.router / 'usr/lib/dnsmasq').glob('.openwrt_pushconfig.*')))
                 self.assertFalse((self.root / 'events').exists())
 
-    def test_additional_files_reject_symlinks_before_installation(self):
+    def test_additional_files_reject_symlinked_parents_before_installation(self):
         self.pull()
         self.extra_files()
         usr = self.repo / 'corewrt/usr'
-        (usr / 'link').symlink_to('/etc/passwd')
-        result = self.run_script('openwrt_pushconfig')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b'Invalid extra file path', result.stderr)
-        (usr / 'link').unlink()
         (self.router / 'usr').symlink_to(self.router / 'root', target_is_directory=True)
         result = self.run_script('openwrt_pushconfig')
         self.assertNotEqual(result.returncode, 0)

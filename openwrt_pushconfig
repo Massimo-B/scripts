@@ -16,7 +16,7 @@ Usage: openwrt_pushconfig [--name NAME] [--force] SSH_HOST REPOSITORY
 
 Copy REPOSITORY/NAME/etc/config, optional etc/apk, and extra files to OpenWrt.
 Extra files under etc, usr, bin, sbin, lib, lib64, opt, root, www, srv are
-installed with their file permissions (without special bits). Symlinks are refused.
+installed with their file permissions (without special bits). Symlinks are preserved.
 Restore APK repositories and keys, then synchronize packages with saved world.
 Packages no longer required by world or its dependencies are removed.
 The router hostname must equal NAME; --force bypasses this check.
@@ -119,8 +119,8 @@ for root in etc usr bin sbin lib lib64 opt root www srv; do
     find "$base" -mindepth 1 \( -name .git -o -path "$repo/$name/etc/config" -o -path "$repo/$name/etc/apk" \) -prune -o -print0 > "$temporary/extra-candidates"
     while IFS= read -r -d '' file; do
         relative=${file#"$repo/$name/"}
-        [[ "$relative" =~ ^([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*[a-zA-Z0-9_+-][a-zA-Z0-9._+-]*$ && ! -L "$file" && ( -d "$file" || -f "$file" ) ]] || die "Invalid extra file path: $relative"
-        if [[ -f "$file" ]]; then
+        [[ "$relative" =~ ^([a-zA-Z0-9_+-][a-zA-Z0-9._+-]*/)*[a-zA-Z0-9_+-][a-zA-Z0-9._+-]*$ && ( -L "$file" || -d "$file" || -f "$file" ) ]] || die "Invalid extra file path: $relative"
+        if [[ -L "$file" || -f "$file" ]]; then
             archive_files+=("$relative")
             printf '%s\n' "$relative" >> "$temporary/extra-files"
         fi
@@ -164,7 +164,7 @@ remote_install=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci awk tar cmp mktemp cp mv ubus sleep find; do
+for tool in uci awk tar cmp mktemp cp mv ubus sleep find readlink; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool (configuration unchanged)"
 done
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
@@ -192,8 +192,9 @@ cleanup() {
     if [ "$extra_installing" = 1 ]; then
         while IFS= read -r relative; do
             target=$router_root/$relative
-            if [ -f "$backup/files/$relative" ]; then
-                cp -p "$backup/files/$relative" "$target" || status=1
+            if [ -L "$backup/files/$relative" ] || [ -f "$backup/files/$relative" ]; then
+                rm -f "$target" || status=1
+                cp -Pp "$backup/files/$relative" "$target" || status=1
             else
                 rm -f "$target" || status=1
             fi
@@ -233,9 +234,9 @@ while IFS= read -r relative; do
         *) fail 'Invalid additional file destination' ;;
     esac
     case "/$relative/" in */../*|*/./*|*//*|*[!a-zA-Z0-9_+./-]*) fail 'Invalid additional file path' ;; esac
-    [ -f "$work/new/$relative" ] && [ ! -L "$work/new/$relative" ] || fail "Expected regular additional file: $relative"
+    { [ -L "$work/new/$relative" ] || [ -f "$work/new/$relative" ]; } || fail "Expected regular additional file: $relative"
     target=$router_root/$relative
-    [ ! -L "$target" ] && { [ ! -e "$target" ] || [ -f "$target" ]; } || fail "Expected regular destination: $relative"
+    { [ -L "$target" ] || [ ! -e "$target" ] || [ -f "$target" ]; } || fail "Expected regular destination: $relative"
     parent=${target%/*}
     while [ -n "$parent" ] && [ "$parent" != "$router_root" ]; do
         [ ! -L "$parent" ] && { [ ! -e "$parent" ] || [ -d "$parent" ]; } || fail "Expected real destination directory: $parent"
@@ -301,9 +302,9 @@ backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"
 while IFS= read -r relative; do
     target=$router_root/$relative
-    if [ -f "$target" ]; then
+    if [ -L "$target" ] || [ -f "$target" ]; then
         mkdir -p "$backup/files/${relative%/*}"
-        cp -p "$target" "$backup/files/$relative"
+        cp -Pp "$target" "$backup/files/$relative"
     fi
 done < "$work/new/extra-files"
 if [ -d "$work/new/etc/apk" ]; then
@@ -332,10 +333,16 @@ while IFS= read -r relative; do
     target=$router_root/$relative
     mkdir -p "${target%/*}"
     extra_temporary=${target%/*}/.openwrt_pushconfig.$$
-    cp -p "$work/new/$relative" "$extra_temporary"
-    chmod u-s,g-s,o-t "$extra_temporary"
+    cp -Pp "$work/new/$relative" "$extra_temporary"
+    if [ ! -L "$extra_temporary" ]; then chmod u-s,g-s,o-t "$extra_temporary"; fi
+    # Remove a directory symlink so mv cannot interpret it as a directory.
+    if [ -L "$target" ]; then rm -f "$target"; fi
     mv -f "$extra_temporary" "$target"
-    cmp -s "$work/new/$relative" "$target" || fail "Installed additional file differs from upload: $relative"
+    if [ -L "$work/new/$relative" ]; then
+        [ -L "$target" ] && [ "$(readlink "$work/new/$relative")" = "$(readlink "$target")" ] || fail "Installed additional link differs from upload: $relative"
+    else
+        [ ! -L "$target" ] && cmp -s "$work/new/$relative" "$target" || fail "Installed additional file differs from upload: $relative"
+    fi
     extra_temporary=
     extra_count=$((extra_count + 1))
     printf '/%s\n' "$relative" >> "$work/installed-files"

@@ -184,14 +184,17 @@ Checks the router hostname against `NAME` before installing anything; `--force`
 skips this check, as described above. Reads the same `NAME/etc/config` and optional `NAME/etc/apk` directories as
 `openwrt_pullconfig`. Edit the local
 files, then push to install and apply them. Push also installs additional regular
-files under `NAME/etc`, `NAME/usr`, `NAME/bin`, `NAME/sbin`, `NAME/lib`,
+files and symbolic links under `NAME/etc`, `NAME/usr`, `NAME/bin`, `NAME/sbin`, `NAME/lib`,
 `NAME/lib64`, `NAME/opt`, `NAME/root`, `NAME/www`, and `NAME/srv`. For example,
 `corewrt/etc/dnsmasq.conf` becomes `/etc/dnsmasq.conf`, and
 `corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh` becomes
 `/usr/lib/dnsmasq/dhcp-short-aliases.sh`. This includes test files stored under
 these directories. File permissions, including executable bits, are preserved;
-special permission bits are cleared. Local symlinks and symlinked destination
-paths are refused. Additional files are backed up under `BACKUP/files/` and
+special permission bits are cleared. Symbolic links retain their literal targets,
+including relative and dangling links; targets are never copied. Symlinked parent
+directories are refused. Regular files and links may replace each other, while
+replacing a real directory with a file or link is refused. UCI and APK snapshots
+continue to require regular files and real directories. Additional files are backed up under `BACKUP/files/` and
 restored if installation fails; files absent locally are retained on the router.
 Pull also refreshes additional files already present locally. To select a new
 file or recursively fetch a directory, use repeatable `--include` options:
