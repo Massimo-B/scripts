@@ -164,7 +164,7 @@ remote_install=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci awk tar cmp mktemp cp mv ubus sleep; do
+for tool in uci awk tar cmp mktemp cp mv ubus sleep find; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool (configuration unchanged)"
 done
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
@@ -320,6 +320,12 @@ if [ -d "$work/new/etc/apk" ]; then
     apk add -- || fail 'APK package synchronization failed'
     echo 'APK packages synchronized with saved world.'
 fi
+: > "$work/installed-files"
+if [ -d "$work/new/etc/apk" ]; then
+    find "$work/new/etc/apk" -type f | while IFS= read -r file; do
+        printf '%s\n' "${file#"$work/new"}"
+    done >> "$work/installed-files"
+fi
 extra_installing=1
 extra_count=0
 while IFS= read -r relative; do
@@ -332,6 +338,7 @@ while IFS= read -r relative; do
     cmp -s "$work/new/$relative" "$target" || fail "Installed additional file differs from upload: $relative"
     extra_temporary=
     extra_count=$((extra_count + 1))
+    printf '/%s\n' "$relative" >> "$work/installed-files"
 done < "$work/new/extra-files"
 installing=1
 set --
@@ -341,12 +348,16 @@ for file in "$work"/new/etc/config/*; do
     chmod 600 /etc/config/.openwrt_pushconfig.$$
     mv -f /etc/config/.openwrt_pushconfig.$$ "/etc/config/$name"
     cmp -s "$file" "/etc/config/$name" || fail "Installed configuration differs from upload: $name"
+    printf '/%s/%s\n' etc/config "$name" >> "$work/installed-files"
     set -- "$@" "$name"
 done
 installing=0
 apk_installing=0
 extra_installing=0
 echo "Additional files installed and verified ($extra_count files)."
+while IFS= read -r path; do
+    printf 'Installed: %s\n' "$path"
+done < "$work/installed-files"
 # Ignore SSH hangup using the shell builtin instead of the optional nohup applet.
 # Set this before forking so there is no race with the SSH session closing.
 trap '' HUP

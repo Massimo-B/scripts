@@ -119,7 +119,9 @@ for root in etc usr bin sbin lib lib64 opt root www srv; do
     find "$base" -mindepth 1 \( -name .git -o -path "$repo/$name/etc/config" -o -path "$repo/$name/etc/apk" \) -prune -o -print0 > "$temporary/extra-candidates"
     while IFS= read -r -d '' file; do
         relative=${file#"$repo/$name/"}
-        valid_extra_path "$relative" && [[ ! -L "$file" && ( -d "$file" || -f "$file" ) ]] || die "Invalid extra file path: $relative"
+        valid_extra_path "$relative" || die "Invalid extra file path: $relative"
+        [[ ! -L "$file" ]] || die "Extra destination must not be a symbolic link: $relative"
+        [[ -d "$file" || -f "$file" ]] || die "Expected regular extra file or directory: $relative"
         [[ ! -f "$file" ]] || printf '%s\n' "$relative" >> "$temporary/extra-paths.unsorted"
     done < "$temporary/extra-candidates"
 done
@@ -313,5 +315,11 @@ while IFS= read -r relative; do
 done < "$temporary/extra-paths"
 cp -- "$temporary/extra-paths" "$selection"
 cp -- "$temporary/extracted/secret-paths" "$repo/$name/secret-paths"
+# Report files received in the archive after the local update has succeeded.
+while IFS= read -r member; do
+    [[ -f "$temporary/extracted/$member" ]] || continue
+    relative=${member#extra/}
+    printf 'Downloaded: %s/%s\n' "$name" "$relative"
+done < "$temporary/members"
 printf 'Copied configuration to %s\n' "$destination"
 git -C "$repo" status --short -- "$name"

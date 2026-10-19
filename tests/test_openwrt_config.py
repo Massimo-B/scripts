@@ -165,6 +165,9 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
             result = self.run_script('openwrt_pushconfig')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(b'Additional files installed and verified (2 files)', result.stdout)
+            self.assertIn(b'Installed: /etc/dnsmasq.conf\n', result.stdout)
+            self.assertIn(b'Installed: /usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
+            self.assertIn(b'Installed: /etc/config/firewall\n', result.stdout)
             self.assertEqual(old.read_bytes(), etc.read_bytes())
             installed = self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh'
             self.assertEqual(installed.read_bytes(), script.read_bytes())
@@ -176,7 +179,10 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         self.assertFalse((self.router / '.gitignore').exists())
         self.assertFalse((self.router / 'secret-paths').exists())
         # A new pull also retrieves the managed additional files.
-        self.pull()
+        result = self.pull()
+        self.assertIn(b'Downloaded: corewrt/etc/dnsmasq.conf\n', result.stdout)
+        self.assertIn(b'Downloaded: corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
+        self.assertIn(b'Downloaded: corewrt/etc/config/firewall\n', result.stdout)
         self.assertEqual(script.read_text(), '#!/bin/sh\nexit 0\n')
 
     def test_pull_refreshes_extra_files_and_retains_files_missing_on_router(self):
@@ -236,6 +242,18 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn(b'Invalid extra selection', result.stderr)
                 self.assertEqual(firewall.read_text(), 'keep local changes')
+
+    def test_pull_local_resolv_symlink_reports_cause_and_keeps_snapshot(self):
+        self.pull()
+        firewall = self.local / 'firewall'
+        firewall.write_text('keep local changes')
+        link = self.local.parent / 'resolv.conf'
+        link.symlink_to('/tmp/resolv.conf')
+        result = self.run_script('openwrt_pullconfig')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b'Extra destination must not be a symbolic link: etc/resolv.conf', result.stderr)
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(firewall.read_text(), 'keep local changes')
 
     def test_additional_files_roll_back_when_uci_install_fails(self):
         self.pull()
@@ -633,6 +651,7 @@ fi
         result = self.run_script('openwrt_pushconfig')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.router / 'apk-events').read_text(), 'update\nadd --\n')
+        self.assertIn(b'Installed: /etc/apk/world\n', result.stdout)
         self.assertEqual((apk / 'world').read_text(), 'extra@custom\nother>=2\n')
         self.assertEqual((apk / 'repositories.d/custom.list').read_bytes(), (local / 'repositories.d/custom.list').read_bytes())
 
