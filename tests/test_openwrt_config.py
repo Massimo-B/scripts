@@ -48,7 +48,7 @@ class ConfigCommandTests(unittest.TestCase):
         self.remote_bin.mkdir()
         # Model a minimal router: no Python, Bash, rsync, or nohup in PATH.
         for command in ('tar', 'gzip', 'cmp', 'mktemp', 'cp', 'mv', 'sleep',
-                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find', 'readlink', 'stat'):
+                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find', 'readlink'):
             (self.remote_bin / command).symlink_to(shutil.which(command))
         self.remote_script('uci', '''if [ "$1" = changes ]; then
     printf '%s' "${PENDING:-}"
@@ -147,9 +147,8 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         self.assertEqual((self.config / 'firewall').stat().st_mode & 0o777, 0o600)
 
     def test_reporting_changed_and_unchanged_files(self):
+        self.assertFalse((self.remote_bin / 'stat').exists())
         self.pull()
-        for file in self.config.iterdir():
-            file.chmod(0o600)
         result = self.run_script('openwrt_pushconfig')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn(b'Checked:', result.stdout)

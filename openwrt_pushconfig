@@ -167,7 +167,7 @@ remote_install=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci awk tar cmp mktemp cp mv ubus sleep find readlink stat; do
+for tool in uci awk tar cmp mktemp cp mv ubus sleep find readlink; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool (configuration unchanged)"
 done
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
@@ -301,43 +301,35 @@ for file in "$work"/new/etc/config/*; do
         [ -z "$option" ] || uci -q -c "$work/new/etc/config" -t "$work/delta" show "$section.$option" >/dev/null 2>&1 || fail "Missing required secret: $section.$option"
     done < "$work/sections"
 done
-# Compare the merged payload before installation, including permissions and links.
+# Compare merged contents and symlink targets before installation.
 : > "$work/changed-files"
 record_change() {
     source=$1
     target=$2
     path=$3
-    mode=$4
     status=M
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
         status=A
     elif [ -L "$source" ]; then
         if [ -L "$target" ] && [ "$(readlink "$source")" = "$(readlink "$target")" ]; then return; fi
     elif [ -f "$target" ] && [ ! -L "$target" ] && cmp -s "$source" "$target"; then
-        actual=$(stat -c %a "$target")
-        if [ "$((0$actual))" = "$mode" ]; then return; fi
+        return
     fi
     printf '%s %s\n' "$status" "$path" >> "$work/changed-files"
 }
 for file in "$work"/new/etc/config/*; do
     relative=etc/config/${file##*/}
-    record_change "$file" "$router_root/$relative" "/$relative" "$((0600))"
+    record_change "$file" "$router_root/$relative" "/$relative"
 done
 if [ -d "$work/new/etc/apk" ]; then
     find "$work/new/etc/apk" -type f | while IFS= read -r file; do
         relative=${file#"$work/new/"}
-        mode=$(stat -c %a "$file")
-        record_change "$file" "$router_root/$relative" "/$relative" "$((0$mode))"
+        record_change "$file" "$router_root/$relative" "/$relative"
     done
 fi
 while IFS= read -r relative; do
     file=$work/new/$relative
-    mode=0
-    if [ ! -L "$file" ]; then
-        mode=$(stat -c %a "$file")
-        mode=$((0$mode & 0777))
-    fi
-    record_change "$file" "$router_root/$relative" "/$relative" "$mode"
+    record_change "$file" "$router_root/$relative" "/$relative"
 done < "$work/new/extra-files"
 backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"

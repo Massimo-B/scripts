@@ -145,7 +145,7 @@ hostname. Use `--force` to bypass this check explicitly:
 still apply. No identity file or initial binding is needed.
 
 Both commands always show changes: pull displays Git status; push lists modified
-files as `M` and new files as `A`, comparing contents, permissions, and symlink
+files as `M` and new files as `A`, comparing contents and symlink
 targets with the router before installation. Add `--verbose` (or `-v`) to also
 list every checked file as `Checked:`.
 
