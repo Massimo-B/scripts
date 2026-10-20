@@ -16,3 +16,9 @@ git commit --author='Codex <codex@openai.com>' -m "Describe the change"
 ```
 
 Verify the resulting author and committer with `git log -1 --format=fuller`.
+
+## Script versions
+
+Whenever you change a script, always update its `--version` output and the
+associated source-version metadata to reflect the new source date and Git
+commit. Keep these values consistent, including in affected test scripts.
