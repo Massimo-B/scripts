@@ -12,7 +12,7 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_pullconfig [--name NAME] [--force] [--include PATH] SSH_HOST REPOSITORY
+Usage: openwrt_pullconfig [--name NAME] [--force] [--verbose] [--include PATH] SSH_HOST REPOSITORY
 
 Copy /etc/config and, when present, /etc/apk into REPOSITORY/NAME/etc.
 Also refresh additional files already present locally or selected in extra-paths.
@@ -33,6 +33,7 @@ download; secret-paths records which values must be preserved during push.
 
 Options:
   --include PATH  Add an extra file or directory (repeatable)
+  -v, --verbose  List all checked files
   --force      Skip the router hostname check
   --name NAME  Destination directory name inside the repository
   --version              Show source date and Git commit ID
@@ -44,6 +45,7 @@ die() { printf 'openwrt_pullconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
 force=0
+verbose=0
 includes=()
 while (($#)); do
     case "$1" in
@@ -58,6 +60,7 @@ while (($#)); do
             shift 2
             ;;
         --force) force=1; shift ;;
+        -v|--verbose) verbose=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
@@ -334,11 +337,13 @@ while IFS= read -r relative; do
 done < "$temporary/extra-paths"
 cp -- "$temporary/extra-paths" "$selection"
 cp -- "$temporary/extracted/secret-paths" "$repo/$name/secret-paths"
-# Report files received in the archive after the local update has succeeded.
-while IFS= read -r member; do
-    [[ -L "$temporary/extracted/$member" || -f "$temporary/extracted/$member" ]] || continue
-    relative=${member#extra/}
-    printf 'Downloaded: %s/%s\n' "$name" "$relative"
-done < "$temporary/members"
+# Report all checked files only when requested; Git status stays unconditional.
+if ((verbose)); then
+    while IFS= read -r member; do
+        [[ -L "$temporary/extracted/$member" || -f "$temporary/extracted/$member" ]] || continue
+        relative=${member#extra/}
+        printf 'Checked: %s/%s\n' "$name" "$relative"
+    done < "$temporary/members"
+fi
 printf 'Copied configuration to %s\n' "$destination"
 git -C "$repo" status --short -- "$name"

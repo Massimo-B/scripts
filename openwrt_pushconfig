@@ -12,7 +12,7 @@ umask 077
 
 usage() {
     cat <<'EOF'
-Usage: openwrt_pushconfig [--name NAME] [--force] SSH_HOST REPOSITORY
+Usage: openwrt_pushconfig [--name NAME] [--force] [--verbose] SSH_HOST REPOSITORY
 
 Copy REPOSITORY/NAME/etc/config, optional etc/apk, and extra files to OpenWrt.
 Extra files under etc, usr, bin, sbin, lib, lib64, opt, root, www, srv are
@@ -31,6 +31,7 @@ installs and verifies the upload, and schedules service reloads. Network
 changes may disconnect clients or change the router address.
 
 Options:
+  -v, --verbose  List all checked files
   --force      Skip the router hostname check
   --name NAME  Source directory name inside the repository
   --version    Show source date and Git commit ID
@@ -42,6 +43,7 @@ die() { printf 'openwrt_pushconfig: %s\n' "$*" >&2; exit 1; }
 
 name=openwrt
 force=0
+verbose=0
 while (($#)); do
     case "$1" in
         --name)
@@ -50,6 +52,7 @@ while (($#)); do
             shift 2
             ;;
         --force) force=1; shift ;;
+        -v|--verbose) verbose=1; shift ;;
         -h|--help) usage; exit 0 ;;
         --) shift; break ;;
         -*) die "Unknown option: $1" ;;
@@ -164,7 +167,7 @@ remote_install=$(cat <<'REMOTE'
 set -eu
 umask 077
 fail() { echo "openwrt_pushconfig: $*" >&2; exit 1; }
-for tool in uci awk tar cmp mktemp cp mv ubus sleep find readlink; do
+for tool in uci awk tar cmp mktemp cp mv ubus sleep find readlink stat; do
     command -v "$tool" >/dev/null || fail "Missing router dependency: $tool (configuration unchanged)"
 done
 mkdir /tmp/openwrt-pushconfig.lock || fail 'Another push is running (or a stale lock exists)'
@@ -298,6 +301,44 @@ for file in "$work"/new/etc/config/*; do
         [ -z "$option" ] || uci -q -c "$work/new/etc/config" -t "$work/delta" show "$section.$option" >/dev/null 2>&1 || fail "Missing required secret: $section.$option"
     done < "$work/sections"
 done
+# Compare the merged payload before installation, including permissions and links.
+: > "$work/changed-files"
+record_change() {
+    source=$1
+    target=$2
+    path=$3
+    mode=$4
+    status=M
+    if [ ! -e "$target" ] && [ ! -L "$target" ]; then
+        status=A
+    elif [ -L "$source" ]; then
+        if [ -L "$target" ] && [ "$(readlink "$source")" = "$(readlink "$target")" ]; then return; fi
+    elif [ -f "$target" ] && [ ! -L "$target" ] && cmp -s "$source" "$target"; then
+        actual=$(stat -c %a "$target")
+        if [ "$((0$actual))" = "$mode" ]; then return; fi
+    fi
+    printf '%s %s\n' "$status" "$path" >> "$work/changed-files"
+}
+for file in "$work"/new/etc/config/*; do
+    relative=etc/config/${file##*/}
+    record_change "$file" "$router_root/$relative" "/$relative" "$((0600))"
+done
+if [ -d "$work/new/etc/apk" ]; then
+    find "$work/new/etc/apk" -type f | while IFS= read -r file; do
+        relative=${file#"$work/new/"}
+        mode=$(stat -c %a "$file")
+        record_change "$file" "$router_root/$relative" "/$relative" "$((0$mode))"
+    done
+fi
+while IFS= read -r relative; do
+    file=$work/new/$relative
+    mode=0
+    if [ ! -L "$file" ]; then
+        mode=$(stat -c %a "$file")
+        mode=$((0$mode & 0777))
+    fi
+    record_change "$file" "$router_root/$relative" "/$relative" "$mode"
+done < "$work/new/extra-files"
 backup=$(mktemp -d /root/openwrt-config-backup.XXXXXX)
 cp -Rp /etc/config "$backup/config"
 while IFS= read -r relative; do
@@ -362,9 +403,12 @@ installing=0
 apk_installing=0
 extra_installing=0
 echo "Additional files installed and verified ($extra_count files)."
-while IFS= read -r path; do
-    printf 'Installed: %s\n' "$path"
-done < "$work/installed-files"
+if [ "$verbose" = 1 ]; then
+    while IFS= read -r path; do
+        printf 'Checked: %s\n' "$path"
+    done < "$work/installed-files"
+fi
+cat "$work/changed-files"
 # Ignore SSH hangup using the shell builtin instead of the optional nohup applet.
 # Set this before forking so there is no race with the SSH session closing.
 trap '' HUP
@@ -388,7 +432,8 @@ echo "Configuration installed and verified ($# packages). Backup: $backup/config
 echo "Service reload scheduled; router log: $backup/apply.log"
 REMOTE
 )
-remote_install="$remote_guard
+remote_install="verbose=$verbose
+$remote_guard
 $remote_secrets
 $remote_install"
 printf 'Uploading %s configuration package(s) to %s...\n' "${#files[@]}" "$host"

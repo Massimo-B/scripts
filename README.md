@@ -144,6 +144,11 @@ hostname. Use `--force` to bypass this check explicitly:
 `--force` only skips the hostname check; configuration and archive validation
 still apply. No identity file or initial binding is needed.
 
+Both commands always show changes: pull displays Git status; push lists modified
+files as `M` and new files as `A`, comparing contents, permissions, and symlink
+targets with the router before installation. Add `--verbose` (or `-v`) to also
+list every checked file as `Checked:`.
+
 Each run mirrors the router's files, overwriting local edits and removing files
 that no longer exist remotely in that destination. Downloads and extraction
 finish before the destination is updated. The script displays Git status but

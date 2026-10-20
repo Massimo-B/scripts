@@ -48,7 +48,7 @@ class ConfigCommandTests(unittest.TestCase):
         self.remote_bin.mkdir()
         # Model a minimal router: no Python, Bash, rsync, or nohup in PATH.
         for command in ('tar', 'gzip', 'cmp', 'mktemp', 'cp', 'mv', 'sleep',
-                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find', 'readlink'):
+                        'mkdir', 'chmod', 'rm', 'rmdir', 'awk', 'cat', 'find', 'readlink', 'stat'):
             (self.remote_bin / command).symlink_to(shutil.which(command))
         self.remote_script('uci', '''if [ "$1" = changes ]; then
     printf '%s' "${PENDING:-}"
@@ -146,6 +146,26 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         self.assertFalse((self.remote_bin / 'nohup').exists())
         self.assertEqual((self.config / 'firewall').stat().st_mode & 0o777, 0o600)
 
+    def test_reporting_changed_and_unchanged_files(self):
+        self.pull()
+        for file in self.config.iterdir():
+            file.chmod(0o600)
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(b'Checked:', result.stdout)
+        self.assertNotIn(b'M ', result.stdout)
+        (self.local / 'firewall').write_bytes(FIREWALL.replace(b'REJECT', b'ACCEPT'))
+        result = self.run_script('openwrt_pushconfig')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'M /etc/config/firewall\n', result.stdout)
+        self.assertNotIn(b'Checked:', result.stdout)
+        result = self.run_script('openwrt_pushconfig', '--verbose')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'Checked: /etc/config/firewall\n', result.stdout)
+        self.assertNotIn(b'M ', result.stdout)
+        result = self.pull()
+        self.assertNotIn(b'Checked:', result.stdout)
+
     def extra_files(self):
         etc = self.repo / 'corewrt/etc/dnsmasq.conf'
         etc.write_text('dhcp-script=/usr/lib/dnsmasq/dhcp-short-aliases.sh\n')
@@ -163,13 +183,19 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         old.write_text('old configuration\n')
         unrelated = self.router / 'etc/unrelated'
         unrelated.write_text('keep')
-        for _ in range(2):
-            result = self.run_script('openwrt_pushconfig')
+        for iteration in range(2):
+            result = self.run_script('openwrt_pushconfig', '--verbose')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn(b'Additional files installed and verified (2 files)', result.stdout)
-            self.assertIn(b'Installed: /etc/dnsmasq.conf\n', result.stdout)
-            self.assertIn(b'Installed: /usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
-            self.assertIn(b'Installed: /etc/config/firewall\n', result.stdout)
+            self.assertIn(b'Checked: /etc/dnsmasq.conf\n', result.stdout)
+            self.assertIn(b'Checked: /usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
+            self.assertIn(b'Checked: /etc/config/firewall\n', result.stdout)
+            if iteration == 0:
+                self.assertIn(b'M /etc/dnsmasq.conf\n', result.stdout)
+                self.assertIn(b'A /usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
+            else:
+                self.assertNotIn(b'M /', result.stdout)
+                self.assertNotIn(b'A /', result.stdout)
             self.assertEqual(old.read_bytes(), etc.read_bytes())
             installed = self.router / 'usr/lib/dnsmasq/dhcp-short-aliases.sh'
             self.assertEqual(installed.read_bytes(), script.read_bytes())
@@ -181,10 +207,11 @@ sys.exit(subprocess.run(['/bin/sh', '-c', bootstrap], input=wire, env=env).retur
         self.assertFalse((self.router / '.gitignore').exists())
         self.assertFalse((self.router / 'secret-paths').exists())
         # A new pull also retrieves the managed additional files.
-        result = self.pull()
-        self.assertIn(b'Downloaded: corewrt/etc/dnsmasq.conf\n', result.stdout)
-        self.assertIn(b'Downloaded: corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
-        self.assertIn(b'Downloaded: corewrt/etc/config/firewall\n', result.stdout)
+        result = self.run_script('openwrt_pullconfig', '--verbose')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn(b'Checked: corewrt/etc/dnsmasq.conf\n', result.stdout)
+        self.assertIn(b'Checked: corewrt/usr/lib/dnsmasq/dhcp-short-aliases.sh\n', result.stdout)
+        self.assertIn(b'Checked: corewrt/etc/config/firewall\n', result.stdout)
         self.assertEqual(script.read_text(), '#!/bin/sh\nexit 0\n')
 
     def test_pull_refreshes_extra_files_and_retains_files_missing_on_router(self):
@@ -725,7 +752,7 @@ fi
         result = self.run_script('openwrt_pushconfig')
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.router / 'apk-events').read_text(), 'update\nadd --\n')
-        self.assertIn(b'Installed: /etc/apk/world\n', result.stdout)
+        self.assertIn(b'M /etc/apk/world\n', result.stdout)
         self.assertEqual((apk / 'world').read_text(), 'extra@custom\nother>=2\n')
         self.assertEqual((apk / 'repositories.d/custom.list').read_bytes(), (local / 'repositories.d/custom.list').read_bytes())
 
